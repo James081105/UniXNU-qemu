@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """List the processes of the kernel that a run-qemu.py run is executing, through its QEMU monitor.
 
-  qemu-ps.py [--run RUN_DIR] [--value SYMBOL[:BYTES] ...]
+  qemu-ps.py [--run RUN_DIR] [--value SYMBOL[:BYTES] ...] [--log FILE]
 
 Walks the kernel's allproc list with QEMU's "x" command (virtual addresses through the current translation; the kernel
 half is mapped in every context) and prints PID, state and name. --value prints kernel globals instead, as unsigned
-little-endian numbers of BYTES bytes (default 4), for example the display's native_legacy_stage. RUN_DIR defaults to
-the newest out/qemu/run/<time>; the run must still be going. The struct proc offsets are the defaults of UniXNU's
-scripts/qemu-entry/gdb-stop.py.
+little-endian numbers of BYTES bytes (default 4), for example the display's native_legacy_stage. --log writes the
+kernel log, which this board shows neither on the screen nor on the serial port: the message buffer (msgbufp) saved
+with QMP memsave, in order. RUN_DIR defaults to the newest out/qemu/run/<time>; the run must still be going. The
+struct proc offsets are the defaults of UniXNU's scripts/qemu-entry/gdb-stop.py.
 """
 import argparse
 import json
@@ -15,6 +16,7 @@ from pathlib import Path
 import re
 import socket
 import subprocess
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT.parent
@@ -24,6 +26,7 @@ STATES = {1: 'idle', 2: 'run', 3: 'stop', 4: 'zombie', 5: 'reaped'}
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument('--run', type=Path, help='run directory (default: the newest)')
 parser.add_argument('--value', action='append', default=[], metavar='SYMBOL[:BYTES]', help='print a kernel global')
+parser.add_argument('--log', type=Path, metavar='FILE', help='write the kernel log')
 args = parser.parse_args()
 run = args.run or max((WORK / 'run').iterdir())
 match = re.search(r'-qmp unix:([^,]+),', (run / 'command.txt').read_text())
@@ -32,22 +35,32 @@ if not match:
 sock = match[1]
 
 
-def hmp(line):
+def qmp(name, **arguments):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-        s.settimeout(10)
-        s.connect(sock)
+        s.settimeout(60)
+        for attempt in range(50):          # QEMU takes one QMP client at a time; run-qemu.py's screenshots use it too
+            try:
+                s.connect(sock)
+                break
+            except ConnectionRefusedError:
+                if attempt == 49:
+                    raise
+                time.sleep(0.2)
         stream = s.makefile('rwb', buffering=0)
         stream.readline()
-        for request in ({'execute': 'qmp_capabilities'},
-                        {'execute': 'human-monitor-command', 'arguments': {'command-line': line}}):
+        for request in ({'execute': 'qmp_capabilities'}, {'execute': name, 'arguments': arguments}):
             stream.write((json.dumps(request) + '\n').encode())
             while True:
                 reply = json.loads(stream.readline())
                 if 'return' in reply or 'error' in reply:
                     break
     if 'error' in reply:
-        raise SystemExit(f'{line}: {reply["error"]}')
+        raise SystemExit(f'{name} {arguments}: {reply["error"]}')
     return reply['return']
+
+
+def hmp(line):
+    return qmp('human-monitor-command', **{'command-line': line})
 
 
 def read(address, count):
@@ -73,6 +86,18 @@ if args.value:
         name, _, size = request.partition(':')
         value = int.from_bytes(read(symbol(name), int(size or 4)), 'little')
         print(f'{name} = {value} ({value:#x})')
+    raise SystemExit(0)
+if args.log:
+    # struct msgbuf: magic, size, write index, read index (ints), then the buffer pointer. The buffer is a ring.
+    buffer = int.from_bytes(read(symbol('msgbufp'), 8), 'little')
+    header = read(buffer, 24)
+    size, write = (int.from_bytes(header[at:at + 4], 'little') for at in (4, 8))
+    ring = args.log.resolve().with_suffix('.ring')
+    qmp('memsave', val=int.from_bytes(header[16:24], 'little'), size=size, filename=str(ring))
+    data = ring.read_bytes()
+    ring.unlink()
+    args.log.write_bytes((data[write:] + data[:write]).replace(b'\0', b''))
+    print(f'kernel log: {args.log}')
     raise SystemExit(0)
 proc = int.from_bytes(read(symbol('allproc'), 8), 'little')
 rows = []
