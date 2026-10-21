@@ -117,8 +117,10 @@ command = [qemu, '-M', 'virt,virtualization=off,secure=off,gic-version=3', '-acc
            '-drive', f'if=pflash,format=raw,readonly=on,file={code}', '-drive', f'if=pflash,format=raw,file={variables}',
            '-drive', f'if=none,id=esp,format=raw,readonly=on,file=fat:{esp}', '-device', 'virtio-blk-pci,drive=esp',
            '-device', 'ramfb', '-device', 'qemu-xhci', '-device', 'usb-kbd', '-nic', 'none',
-           # A cocoa window scales the 800x600 frame buffer to its size (drag its corner, or View > Zoom To Fit).
-           '-display', args.display + (',zoom-to-fit=on' if args.display == 'cocoa' else ''), '-no-reboot',
+           # A cocoa window scales the 800x600 frame buffer to its size (drag its corner, or View > Zoom To Fit) and
+           # keeps the Mac pointer visible: with the absolute tablet QEMU would hide it, and iPadOS draws none for a
+           # touch screen.
+           '-display', args.display + (',zoom-to-fit=on,show-cursor=on' if args.display == 'cocoa' else ''), '-no-reboot',
            '-serial', f'file:{out / "serial.log"}', '-qmp', f'unix:{sock},server=on,wait=off']
 if args.os_root:
     # The whole disk image as the host sees it, read through its read-only attachment; the policy that
