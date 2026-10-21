@@ -4,7 +4,8 @@
 build-native-legacy-display.py of UniXNU-sheng, reduced to the display, the key store and the HID input:
 NativeLegacyDisplay, this board's LegacyDisplayProbe.cpp, NativeGOPPresenter, sheng's KeyStoreProbe.cpp and
 NativeKeyStoreEvents, sheng's HidInputProbe.cpp and NativeHidInput, and this board's TouchState.cpp (the finger set
-that sheng's touch panel probe would define) and VirtioInput.cpp (QEMU's VirtIO tablet and keyboard). The original-class checks and bindings are unchanged. Its inputs come
+that sheng's touch panel probe would define), VirtioInput.cpp (QEMU's VirtIO tablet and keyboard) and SharedWindow.cpp
+(the memory window shared with the Mac). The original-class checks and bindings are unchanged. Its inputs come
 from build-display-abi.py (the reference candidate and the observation of the original class); UniXNU's
 build-native-hid-input.py gets the kernel step's kernel as its reference candidate, which carries the same original
 IOHIDFamily as every kernel of this IPSW.
@@ -200,6 +201,9 @@ run([str(touch_source) if str(arg)==str(source) else str(touch_obj) if str(arg)=
 virtio_input_source=ROOT/'kits/qemu/VirtioInput.cpp'
 virtio_input_obj=OUT/'VirtioInput.o'
 run([str(virtio_input_source) if str(arg)==str(source) else str(virtio_input_obj) if str(arg)==str(OUT/'LegacyDisplayProbe.o') else arg for arg in cmd],cwd=r['directory'])
+shared_window_source=ROOT/'kits/qemu/SharedWindow.cpp'
+shared_window_obj=OUT/'SharedWindow.o'
+run([str(shared_window_source) if str(arg)==str(source) else str(shared_window_obj) if str(arg)==str(OUT/'LegacyDisplayProbe.o') else arg for arg in cmd],cwd=r['directory'])
 # The display backend, its probe, the key store and the HID input: sheng's boot process, log, reset, touch panel, CPU
 # frequency and GPU power objects stay out (they drive sheng hardware or need its kit and NativeAdreno).
 archive=OUT/'libNativeLegacyDisplay.late.a';archive.unlink(missing_ok=True)
@@ -218,9 +222,10 @@ run([llvm/'llvm-objcopy','--remove-section=__DATA,__mod_init_func',
 require(code((keyevents/'NativeKeyStoreEvents.o').read_bytes(),macho((keyevents/'NativeKeyStoreEvents.o').read_bytes()))==
         code(keyevents_late.read_bytes(),macho(keyevents_late.read_bytes())),'Owned event-service instructions unchanged by late init staging')
 run(['xcrun','ar','rcs',archive,late,OUT/'original-bindings.o',OUT/'LegacyDisplayProbe.o',keystore_obj,keyevents_late,
-     hid_obj,touch_obj,virtio_input_obj,hid_dir/'NativeHidInput.late.o',hid_dir/'hid-original-bindings.o'])
+     hid_obj,touch_obj,virtio_input_obj,shared_window_obj,hid_dir/'NativeHidInput.late.o',hid_dir/'hid-original-bindings.o'])
 sources=[ROOT/'drivers/NativeMobileDisplay/NativeLegacyDisplay.cpp',ROOT/'drivers/NativeMobileDisplay/NativeLegacyRequest.h',source,
          keystore_source,ROOT/'drivers/NativeKeyStoreEvents/NativeKeyStoreEvents.cpp',hid_source,touch_source,virtio_input_source,
+         shared_window_source,
          ROOT/'drivers/NativeHidInput/NativeHidInput.cpp',ROOT/'scripts/build-native-hid-input.py']
 print(run(['python3',ROOT/'scripts/build-arm-driver.py','NativeGOPPresenter'],text=True),end='')
 gop=ROOT/'build/native-gop-presenter';gop_late=gop/'NativeGOPPresenter.late.o'

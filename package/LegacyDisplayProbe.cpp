@@ -474,10 +474,12 @@ void native_legacy_display_late_probe(void);
 extern void native_keystore_probe(void);
 extern void native_hid_input_probe(void);
 extern void native_virtio_input_probe(void);
+extern void native_shared_window_probe(void);
 void native_legacy_display_late_probe(void) {
     native_keystore_probe();
     native_hid_input_probe();
     native_virtio_input_probe();
+    native_shared_window_probe();
     IOService *display=pendingLegacyDisplay;if(!display)return;pendingLegacyDisplay=nullptr;
     native_legacy_surface_status=OSKextLoadKextWithIdentifier("com.apple.iokit.IOSurface");
     OSDictionary *matching=IOService::nameMatching("IOCoreSurfaceRoot");

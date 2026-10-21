@@ -24,6 +24,7 @@ import zlib
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT.parent
 MEMORY_MIB = 6144                    # [payload] dram_size of board.toml
+SHARED_WINDOW = 0x40000000 + (MEMORY_MIB << 20)   # --shared-window: guest physical, after QEMU virt's RAM
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--seconds', type=int, default=300, help='stop QEMU after this long')
@@ -40,6 +41,13 @@ parser.add_argument('--screen', default='1376x1024',
                          '"firmware" for the firmware\'s 800x600. Keep WIDTH a multiple of 16 (rows of a multiple of '
                          '64 bytes): at 1366, the 12.9-inch iPad Pro\'s 1366x1024 points, every row of the picture '
                          'lands 2-3 bytes off. 1376x1024 is the nearest such size')
+parser.add_argument('--shared-window', type=int, default=0, metavar='MIB',
+                    help='add MIB of guest memory, shared with this Mac through RUN_DIR/shared.bin, as a second memory '
+                         'node after the 6 GiB (guest physical 0x1c0000000); scripts/guest-ram.py maps it. The file '
+                         'is removed when QEMU stops')
+parser.add_argument('--shared-window-cache', choices=('wb', 'device'), default='wb',
+                    help='how package/SharedWindow.cpp maps the window in the guest: write-back cacheable, as this '
+                         'Mac maps the file, or device memory')
 parser.add_argument('--accel', choices=('tcg', 'hvf'), default='tcg',
                     help='tcg emulates a Cortex-A710; hvf runs the guest on this Mac\'s CPU (Hypervisor.framework). The '
                          'payload must be built for the same accelerator: UNIXNU_QEMU_ACCEL=hvf for hvf')
@@ -140,6 +148,19 @@ command = [qemu, '-M', 'virt,virtualization=off,secure=off,gic-version=3', '-acc
            '-serial', f'file:{out / "serial.log"}', '-qmp', f'unix:{sock},server=on,wait=off']
 if args.screen != 'firmware':
     command += ['-fw_cfg', f'name=opt/org.unixnu/ramfb-size,string={args.screen}']
+shared_ram = out / 'shared.bin'
+if args.shared_window:
+    # Node 0 is the guest's ordinary memory; node 1 follows it and is this file, mapped shared by QEMU (and HVF).
+    # Sharing all of the guest's memory instead stopped the userland at launchd, spinning. The kernel only manages
+    # DarwinBoot's window, so it leaves node 1 to whoever maps it.
+    at = command.index('-m')
+    command[at + 1] = str(MEMORY_MIB + args.shared_window)
+    command += ['-object', f'memory-backend-ram,id=ram0,size={MEMORY_MIB}M',
+                '-object', f'memory-backend-file,id=ram1,size={args.shared_window}M,mem-path={shared_ram},share=on',
+                '-numa', 'node,nodeid=0,cpus=0,memdev=ram0', '-numa', 'node,nodeid=1,memdev=ram1',
+                # package/SharedWindow.cpp finds the window here: BASE:SIZE:MODE in hexadecimal.
+                '-fw_cfg', f'name=opt/org.unixnu/shared-window,string={SHARED_WINDOW:x}:{args.shared_window << 20:x}:'
+                           f'{args.shared_window_cache}']
 if args.os_root:
     # The whole disk image as the host sees it, read through its read-only attachment; the policy that
     # build-owner-os-policy.py signed covers exactly these bytes.
@@ -247,6 +268,7 @@ if process.poll() is None:
         process.kill()
 process.wait(timeout=30)
 shutil.rmtree(work, ignore_errors=True)
+shared_ram.unlink(missing_ok=True)
 log = (out / 'serial.log').read_bytes().decode('utf-8', 'replace')
 for line in [line for line in log.splitlines() if line.startswith(('UNIXNU:', 'DARWINBOOT:'))][-4:]:
     print(line)
