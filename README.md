@@ -88,7 +88,7 @@ python3 out/qemu/tree/scripts/qemu-ps.py          # in a second shell, while it 
 
 `build-os-root.py` skips each step whose output exists. The first run boots the `qemu_defconfig` kernel in QEMU once (for the storage ABI), signs and checks the 1,483,785 blocks of the OS disk image and the 806,400 blocks of the SystemOS image, and attaches the OS image read-only for the time of the OS policy and the Data seed. The owner private key stays in `out/qemu/tree/build/verified-root-host/keys`; a new key needs new policies, a new kernel and payload. The Data seed and its volume UUID stay in `.cache/firmware/owner-data` of this repository; `qemu_root_defconfig` takes the UUID from the environment because every seed has its own.
 
-`--os-root` attaches the OS disk image read-only (without mounting it) and gives QEMU the raw device and the SystemOS image file as two VirtIO block devices. The kernel picks each disk's policy by its size and checks every block it reads, mounts the OS volume by its UUID and accepts it as the root, mounts SystemOS read-only as a union over `/`, mounts the Data ramdisk at `/private/var` and starts the original `/sbin/launchd`. The screen keeps the entry probe bars; `qemu-ps.py` shows the userland: after 5 minutes about 120 processes (logd, configd, securityd, lockdownd, usermanagerd, backboardd and the rest of the system daemons) and no panic for at least 11 minutes. SpringBoard does not start: there is no display for backboardd.
+`--os-root` attaches the OS disk image read-only (without mounting it) and gives QEMU the raw device and the SystemOS image file as two VirtIO block devices. The kernel picks each disk's policy by its size and checks every block it reads, mounts the OS volume by its UUID and accepts it as the root, mounts SystemOS read-only as a union over `/`, mounts the Data ramdisk at `/private/var` and starts the original `/sbin/launchd`. The screen keeps the entry probe bars; `qemu-ps.py` shows the userland: after 5 minutes about 120 processes (logd, configd, securityd, lockdownd, usermanagerd, backboardd and the rest of the system daemons) and no panic in a 30-minute run. SpringBoard does not start: there is no display for backboardd.
 
 Each missing piece stops the boot with its own panic:
 
@@ -123,7 +123,7 @@ sheng disables watchdogd with `sheng-disable-watchdogd=1` instead: its boot prog
 | AMFI, original `/sbin/launchd` from the OS volume | starts with the original trust cache bundle |
 | SystemOS union mount, dyld shared cache | works |
 | Data ramdisk at `/private/var` (NativeRamBlock) | works |
-| System daemons | about 120 processes, no panic for at least 11 minutes |
+| System daemons | about 120 processes, no panic in a 30-minute run |
 | backboardd, SpringBoard | backboardd runs; SpringBoard does not start without a display |
 
 ## License
