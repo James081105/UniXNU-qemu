@@ -3,7 +3,7 @@
 // sections 4.2 (MMIO transport) and 5.8 (input device); the events are Linux evdev (type, code, value).
 //
 // The tablet's left button down is one finger at the pointer, its motion moves the finger, the button up lifts it: the
-// finger set of TouchState.cpp, which NativeHidInput reports every 8 ms. On the keyboard, Home and F1 press Home through
+// finger set of TouchState.cpp, which NativeHidInput reports as each frame is published. On the keyboard, Home and F1 press Home through
 // NativeHidInput's command word. Every input device found is polled every 8 ms (the event queue asks for no interrupts).
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOService.h>
@@ -17,6 +17,7 @@ extern "C" {
 extern volatile uint32_t native_touch_seq, native_touch_count;
 extern volatile int native_touch_xs[12], native_touch_ys[12], native_touch_ids[12];
 extern volatile uint32_t native_hid_input_command;
+void native_touch_published(void);
 volatile uint32_t native_virtio_input_devices, native_virtio_input_events, native_virtio_input_touches,
     native_virtio_input_keys, native_virtio_input_failures;
 void native_virtio_input_probe(void);
@@ -114,6 +115,7 @@ struct Device {
         }
         __asm__ volatile("dmb ish" ::: "memory"); native_touch_seq = (seq | 1) + 1;
         native_virtio_input_touches = native_virtio_input_touches + 1;
+        native_touch_published();
     }
     void handle(const Event &event) {
         native_virtio_input_events = native_virtio_input_events + 1;
