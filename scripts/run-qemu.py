@@ -35,6 +35,11 @@ parser.add_argument('--native-user', action='store_true',
 parser.add_argument('--os-root', action='store_true',
                     help='attach the OS disk image of the IPSW read-only as a VirtIO block device, the root of a kernel '
                          'built with qemu_root_defconfig (scripts/build-os-root.py)')
+parser.add_argument('--screen', default='1376x1024',
+                    help='WIDTHxHEIGHT of the screen (package/QemuRamfbPkg switches ramfb before DarwinBoot), or '
+                         '"firmware" for the firmware\'s 800x600. Keep WIDTH a multiple of 16 (rows of a multiple of '
+                         '64 bytes): at 1366, the 12.9-inch iPad Pro\'s 1366x1024 points, every row of the picture '
+                         'lands 2-3 bytes off. 1376x1024 is the nearest such size')
 parser.add_argument('--accel', choices=('tcg', 'hvf'), default='tcg',
                     help='tcg emulates a Cortex-A710; hvf runs the guest on this Mac\'s CPU (Hypervisor.framework). The '
                          'payload must be built for the same accelerator: UNIXNU_QEMU_ACCEL=hvf for hvf')
@@ -65,6 +70,17 @@ config = (esp / 'EFI/UniXNU/unixnu.toml').read_text()
 if 'Payloads/DarwinBoot.efi' not in config:
     raise SystemExit('the payload does not load DarwinBoot as a driver; board.toml [payload] loader must not be "firmware"')
 shutil.copyfile(darwinboot, esp / 'EFI/UniXNU/Payloads/DarwinBoot.efi')
+if args.screen != 'firmware':
+    if not re.fullmatch(r'\d{3,4}x\d{3,4}', args.screen):
+        parser.error('--screen takes WIDTHxHEIGHT or "firmware"')
+    # Loaded before DarwinBoot, so UniXNU's menu and the kernel's frame buffer have the new size.
+    ramfb = ROOT / 'build/qemu-ramfb-efi/QemuRamfb.efi'
+    if not ramfb.is_file():
+        subprocess.run(['python3', ROOT / 'scripts/build-qemu-ramfb-efi.py'], check=True)
+    shutil.copyfile(ramfb, esp / 'EFI/UniXNU/Payloads/QemuRamfb.efi')
+    config = config.replace('[[driver]]\npath = "Payloads/DarwinBoot.efi"',
+                            '[[driver]]\npath = "Payloads/QemuRamfb.efi"\n\n[[driver]]\npath = "Payloads/DarwinBoot.efi"', 1)
+    (esp / 'EFI/UniXNU/unixnu.toml').write_text(config)
 
 spec = importlib.util.spec_from_file_location('make_qemu_adt', ROOT / 'scripts/make-qemu-adt.py')
 adt_tool = importlib.util.module_from_spec(spec)
@@ -122,6 +138,8 @@ command = [qemu, '-M', 'virt,virtualization=off,secure=off,gic-version=3', '-acc
            # touch screen.
            '-display', args.display + (',zoom-to-fit=on,show-cursor=on' if args.display == 'cocoa' else ''), '-no-reboot',
            '-serial', f'file:{out / "serial.log"}', '-qmp', f'unix:{sock},server=on,wait=off']
+if args.screen != 'firmware':
+    command += ['-fw_cfg', f'name=opt/org.unixnu/ramfb-size,string={args.screen}']
 if args.os_root:
     # The whole disk image as the host sees it, read through its read-only attachment; the policy that
     # build-owner-os-policy.py signed covers exactly these bytes.
