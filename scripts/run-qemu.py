@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""Boot the qemu board's payload in QEMU virt (GICv3, Cortex-A710, 6 GiB, ramfb).
+
+Run in the build tree (out/qemu/tree) after "unixnu build package kernel payload". The script stages an ESP from
+UniXNU (as BOOTAA64.EFI), the files of the payload volume and DarwinBoot (scripts/build-darwinboot-efi.py), boots it,
+keeps the serial log and takes a screenshot over QMP at a fixed interval. Output goes to out/qemu/run/<time>/.
+"""
+import argparse
+import datetime
+import json
+import os
+from pathlib import Path
+import shutil
+import socket
+import struct
+import subprocess
+import tempfile
+import time
+import zlib
+
+ROOT = Path(__file__).resolve().parents[1]
+WORK = ROOT.parent
+MEMORY_MIB = 6144                    # [payload] dram_size of board.toml
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--seconds', type=int, default=300, help='stop QEMU after this long')
+parser.add_argument('--every', type=int, default=20, help='seconds between screenshots')
+parser.add_argument('--display', default='none', help='none, or cocoa for a window on this Mac')
+args = parser.parse_args()
+
+qemu = shutil.which('qemu-system-aarch64')
+if not qemu:
+    raise SystemExit('qemu-system-aarch64 not found (brew install qemu)')
+code = Path(qemu).resolve().parents[1] / 'share/qemu/edk2-aarch64-code.fd'
+payload = WORK / 'payload/payload.img'
+unixnu = WORK / 'package/Build/Out/AARCH64-DEBUG/UniXNU.efi'
+for path, step in ((code, 'brew install qemu'), (payload, 'unixnu build payload'), (unixnu, 'unixnu build package')):
+    if not path.is_file():
+        raise SystemExit(f'{path} missing ({step})')
+darwinboot = ROOT / 'build/darwinboot-efi/DarwinBoot.efi'
+if not darwinboot.is_file():
+    subprocess.run(['python3', ROOT / 'scripts/build-darwinboot-efi.py'], check=True)
+
+out = WORK / 'run' / datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+esp = out / 'esp'
+esp.mkdir(parents=True)
+subprocess.run(['mcopy', '-s', '-n', '-i', payload, '::/EFI', esp], check=True, env=dict(os.environ, MTOOLS_SKIP_CHECK='1'))
+(esp / 'EFI/BOOT').mkdir(parents=True, exist_ok=True)
+shutil.copyfile(unixnu, esp / 'EFI/BOOT/BOOTAA64.EFI')
+config = (esp / 'EFI/UniXNU/unixnu.toml').read_text()
+if 'Payloads/DarwinBoot.efi' not in config:
+    raise SystemExit('the payload does not load DarwinBoot as a driver; board.toml [payload] loader must not be "firmware"')
+shutil.copyfile(darwinboot, esp / 'EFI/UniXNU/Payloads/DarwinBoot.efi')
+
+work = Path(tempfile.mkdtemp(prefix='unixnu-qemu-'))   # short path: a QMP socket name is limited to 104 bytes
+variables = work / 'vars.fd'
+with variables.open('wb') as f:
+    f.truncate(code.stat().st_size)
+sock = work / 'qmp.sock'
+command = [qemu, '-M', 'virt,virtualization=off,secure=off,gic-version=3', '-accel', 'tcg', '-cpu', 'cortex-a710',
+           '-m', str(MEMORY_MIB), '-smp', '1',
+           '-drive', f'if=pflash,format=raw,readonly=on,file={code}', '-drive', f'if=pflash,format=raw,file={variables}',
+           '-drive', f'if=none,id=esp,format=raw,readonly=on,file=fat:{esp}', '-device', 'virtio-blk-pci,drive=esp',
+           '-device', 'ramfb', '-device', 'qemu-xhci', '-device', 'usb-kbd', '-nic', 'none',
+           '-display', args.display, '-no-reboot',
+           '-serial', f'file:{out / "serial.log"}', '-qmp', f'unix:{sock},server=on,wait=off']
+(out / 'command.txt').write_text(' '.join(str(part) for part in command) + '\n')
+process = subprocess.Popen([str(part) for part in command], stdout=open(out / 'qemu.log', 'w'), stderr=subprocess.STDOUT)
+
+
+def png(ppm, target):
+    data = ppm.read_bytes()
+    fields, at = [], 0
+    while len(fields) < 4:
+        while data[at:at + 1].isspace():
+            at += 1
+        end = at
+        while not data[end:end + 1].isspace():
+            end += 1
+        fields.append(data[at:end])
+        at = end
+    width, height = int(fields[1]), int(fields[2])
+    pixels = data[at + 1:]
+    rows = b''.join(b'\0' + pixels[y * width * 3:(y + 1) * width * 3] for y in range(height))
+
+    def chunk(tag, body):
+        return struct.pack('>I', len(body)) + tag + body + struct.pack('>I', zlib.crc32(tag + body) & 0xffffffff)
+    target.write_bytes(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)) +
+                       chunk(b'IDAT', zlib.compress(rows, 6)) + chunk(b'IEND', b''))
+
+
+def qmp(name, **arguments):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(10)
+        s.connect(str(sock))
+        stream = s.makefile('rwb', buffering=0)
+        stream.readline()
+        for request in ({'execute': 'qmp_capabilities'}, {'execute': name, 'arguments': arguments}):
+            stream.write((json.dumps(request) + '\n').encode())
+            while True:
+                reply = json.loads(stream.readline())
+                if 'return' in reply or 'error' in reply:
+                    break
+        return reply
+
+
+start, shots = time.time(), []
+while time.time() - start < args.seconds and process.poll() is None:
+    time.sleep(args.every)
+    if process.poll() is not None:
+        break
+    ppm = work / 'screen.ppm'
+    try:
+        if 'error' not in qmp('screendump', filename=str(ppm)):
+            shots.append(out / f'screen-{int(time.time() - start):03d}s.png')
+            png(ppm, shots[-1])
+    except OSError as error:
+        print('screendump failed:', error)
+if process.poll() is None:
+    try:
+        qmp('quit')
+    except OSError:
+        process.kill()
+process.wait(timeout=30)
+shutil.rmtree(work, ignore_errors=True)
+log = (out / 'serial.log').read_bytes().decode('utf-8', 'replace')
+for line in [line for line in log.splitlines() if line.startswith(('UNIXNU:', 'DARWINBOOT:'))][-4:]:
+    print(line)
+print(f'qemu exit {process.returncode}; {len(shots)} screenshots in {out}')
+if shots:
+    print(f'last screen: {shots[-1]}')
