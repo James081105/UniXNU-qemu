@@ -23,7 +23,8 @@ What QEMU does not cover: the stock bootloader, the board firmware, UFS, touch, 
 | `feeds.toml` | IOStorageFamily ([UniXNU#7](https://github.com/UniXNU/UniXNU/issues/7)) and dyld 1165.3 (for `audit-target-display-query.py`), which UniXNU's feeds do not list |
 | `scripts/make-qemu-adt.py` | Device tree: `make-dt.py` (GICv3, NVRAM proxy, memory window, SHA2-384, platform-only AMFI, root matching, the VirtIO MMIO windows of QEMU's own device tree, `vmm-present`) plus the platform seed and the iPad7,1 identity of the board trees; the UFS test nodes of `make-dt.py` are removed |
 | `scripts/build-darwinboot-efi.py` | DarwinBoot as a standalone driver image |
-| `scripts/run-qemu.py` | Stage the ESP, boot, keep the serial log and take screenshots; `--native-user` boots UniXNU's static test process from mockfs, `--os-root` attaches the OS and SystemOS images and adds the VirtIO tablet and keyboard, `--accel hvf` runs on this Mac's CPU; a cocoa window scales the screen to its size |
+| `scripts/run-qemu.py` | Stage the ESP, boot, keep the serial log and take screenshots; `--native-user` boots UniXNU's static test process from mockfs, `--os-root` attaches the OS and SystemOS images and adds the VirtIO tablet and keyboard, `--accel hvf` runs on this Mac's CPU, `--screen` sets the screen size (default 1376x1024); a cocoa window scales the screen to its size |
+| `package/QemuRamfbPkg`, `scripts/build-qemu-ramfb-efi.py` | A UEFI driver that `run-qemu.py` loads before DarwinBoot: it switches ramfb to the size of the fw_cfg item `opt/org.unixnu/ramfb-size` and makes it the only mode of every GOP instance, so UniXNU, DarwinBoot and the kernel use it. The firmware's ramfb driver offers 640x480, 800x600 and 1024x768 only |
 | `scripts/qemu-ps.py` | The guest's processes (PID, state, name) of a running `run-qemu.py`, read from the kernel's `allproc` through the QEMU monitor; `--value` reads kernel globals such as the display's counters, `--log` saves the kernel log |
 | `scripts/qemu_esp.py` | The ESP of a QEMU observation with UniXNU's `gdb-stop.py`: the payload with the kernel step's kernel and extra arguments |
 | `scripts/build-display-abi.py` | The inputs of UniXNU's `audit-mobile-graphics-legacy.py`: this board's kernel as the candidate and the original `IOMobileFramebufferLegacy` observed in QEMU |
@@ -166,7 +167,11 @@ sheng disables watchdogd with `sheng-disable-watchdogd=1` instead: its boot prog
 | Idle sleep | kept off by SpringBoard preferences in the Data seed; without them the system sleeps and ArmCpu panics (`unsupported quiesce`) |
 | Touch (QEMU tablet), Home (Home or F1) | works: Setup is walked through by mouse |
 | Typing | not yet |
-| Screen size | 800x600, the UEFI frame buffer mode; the window scales it |
+| Screen size | 1376x1024 (`run-qemu.py --screen`); the window scales it. Widths that are not a multiple of 16 slant the picture (1366: 2-3 bytes per row); switching after the kernel has started is not possible (`PE_state` is read-only after boot) |
+| Vnodes | `kern.maxvnodes` 66560 in the device tree; the BCM2837 configuration's 1024 made the kernel kill apps, backboardd and SpringBoard |
+| Setup | skipped (`unixnu build payload --skip-setup`): lockdownd waits without a timeout on a MIG request (1203) whose server, presumably fairplayd, does not run without FairPlay's kernel extension, and Setup waits on it through profiled |
+| Settings, icons | Settings stays white: iconservicesagent crashes in CoreImage (no Metal, then a NULL EAGL context) and IconServices retries |
+| Safari | quits at start: SafariShared reads a built-in list from a missing URL; the App cryptex (AppOS) is not mounted |
 
 ## License
 
