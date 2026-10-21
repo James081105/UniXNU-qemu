@@ -118,6 +118,11 @@ def main():
     # /defaults/sleep-disabled: IOPMrootDomain refuses every system sleep (gSleepDisabledFlag, read once boot has
     # completed). ArmCpu cannot quiesce the CPU, and an idle sleep would end in its "unsupported quiesce" panic.
     put(child(tree, 'defaults'), 'sleep-disabled', struct.pack('<I', 1))
+    # /defaults/kern.maxvnodes: the BCM2837 kernel configuration caps the vnodes at 1024 (CONFIG_VNODES), while the
+    # iPadOS userland keeps about 2000 open. The kernel then reclaims vnodes by killing processes ("vnode jetsam"):
+    # apps, backboardd and SpringBoard. XNU takes this value instead of its own sizing (bsd/dev/unix_startup.c), here
+    # the one that sizing gives for the 4 GiB the kernel manages: 4 GiB / 64 KiB + 1024.
+    put(child(tree, 'defaults'), 'kern.maxvnodes', struct.pack('<I', (4 << 30) // 65536 + 1024))
     arm_io = child(tree, 'arm-io')
     arm_io[2] = [c for c in arm_io[2] if c[0] not in ('ufshc', 'ufsphy')]
     if args.ipad_identity:
