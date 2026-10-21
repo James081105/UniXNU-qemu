@@ -21,6 +21,8 @@
 #define QM_REPLY_BYTES 0x70000ull
 #define QM_COMPLETIONS 0x100000ull
 #define QM_COMPLETION_SLOTS 4096u
+#define QM_LOG 0x1f0000ull                   // the guest's log lines, a ring the host copies into its own log
+#define QM_LOG_BYTES 0x10000ull
 #define QM_HEAP 0x200000ull                  // to the window's end: buffers, shadows and staging, allocated by the guest
 #define QM_HEAP_ALIGNMENT 256ull             // every allocation (a linear texture's offset needs 16 on Apple GPUs)
 #define QM_NONE (~0ull)
@@ -34,6 +36,8 @@ struct QMControl {
     uint64_t completionsWritten;             // host: QMCompletion records written into the ring
     uint64_t completionsRead;                // guest: records it has taken
     uint64_t windowBytes;                    // guest: the window's size
+    uint64_t logWritten;                     // guest: bytes written into the log ring
+    uint64_t logRead;                        // host: bytes it has copied out
 };
 struct QMRequestHeader {uint32_t op, bytes;};                        // then bytes of the op's payload
 struct QMReplyHeader {int32_t status; uint32_t bytes; uint64_t handle;}; // status 0, or a failure whose payload is its reason (text)

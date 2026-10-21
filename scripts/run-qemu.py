@@ -48,12 +48,21 @@ parser.add_argument('--shared-window', type=int, default=0, metavar='MIB',
 parser.add_argument('--shared-window-cache', choices=('wb', 'device'), default='wb',
                     help='how package/SharedWindow.cpp maps the window in the guest: write-back cacheable, as this '
                          'Mac maps the file, or device memory')
+parser.add_argument('--metal', action='store_true',
+                    help='give the guest a Metal device whose work runs on this Mac\'s GPU (package/QemuMetal): a 2 GiB '
+                         'window unless --shared-window says otherwise, and qemu-metal-host serving it (build-qemu-metal.py '
+                         'host), with its log in RUN_DIR/metal-host.log. The payload carries the plugin (build-qemu-metal.py guest)')
 parser.add_argument('--accel', choices=('tcg', 'hvf'), default='tcg',
                     help='tcg emulates a Cortex-A710; hvf runs the guest on this Mac\'s CPU (Hypervisor.framework). The '
                          'payload must be built for the same accelerator: UNIXNU_QEMU_ACCEL=hvf for hvf')
 args = parser.parse_args()
 if args.native_user and args.os_root:
     parser.error('--native-user boots from md0; leave out --os-root')
+if args.metal and not args.shared_window:
+    args.shared_window = 2048
+metal_host = ROOT / 'build/qemu-metal/qemu-metal-host'
+if args.metal and not metal_host.is_file():
+    raise SystemExit(f'{metal_host} missing (scripts/build-qemu-metal.py host)')
 
 qemu = shutil.which('qemu-system-aarch64')
 if not qemu:
@@ -190,6 +199,12 @@ if args.os_root:
                 # Home or F1 is the Home button. QEMU sends its input to them once the driver has started them.
                 '-device', 'virtio-tablet-device', '-device', 'virtio-keyboard-device']
 (out / 'command.txt').write_text(' '.join(str(part) for part in command) + '\n')
+host = None
+if args.metal:
+    # The window file exists before QEMU starts, so the host maps the same file QEMU then backs the window with.
+    with shared_ram.open('wb') as handle:
+        handle.truncate(args.shared_window << 20)
+    host = subprocess.Popen([str(metal_host), '--window', str(shared_ram), '--log', str(out / 'metal-host.log')])
 process = subprocess.Popen([str(part) for part in command], stdout=open(out / 'qemu.log', 'w'), stderr=subprocess.STDOUT)
 
 
@@ -268,6 +283,9 @@ if process.poll() is None:
         process.kill()
 process.wait(timeout=30)
 shutil.rmtree(work, ignore_errors=True)
+if host:
+    host.terminate()
+    host.wait(timeout=30)
 shared_ram.unlink(missing_ok=True)
 log = (out / 'serial.log').read_bytes().decode('utf-8', 'replace')
 for line in [line for line in log.splitlines() if line.startswith(('UNIXNU:', 'DARWINBOOT:'))][-4:]:

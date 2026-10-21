@@ -204,6 +204,37 @@ run([str(virtio_input_source) if str(arg)==str(source) else str(virtio_input_obj
 shared_window_source=ROOT/'kits/qemu/SharedWindow.cpp'
 shared_window_obj=OUT/'SharedWindow.o'
 run([str(shared_window_source) if str(arg)==str(source) else str(shared_window_obj) if str(arg)==str(OUT/'LegacyDisplayProbe.o') else arg for arg in cmd],cwd=r['directory'])
+# The Metal accelerator (package/QemuMetal): its classes derive from the original IOAcceleratorES, bound to the audited original
+# constructor, destructor and metaclass as sheng's (build-native-adreno-accelerator.py), and their static initializer is staged for
+# QemuMetalPublish.cpp, which runs it once IOGPUFamily has loaded.
+metal_publish_source=ROOT/'kits/qemu/QemuMetal/QemuMetalPublish.cpp'
+metal_publish_obj=OUT/'QemuMetalPublish.o'
+run([str(metal_publish_source) if str(arg)==str(source) else str(metal_publish_obj) if str(arg)==str(OUT/'LegacyDisplayProbe.o') else arg for arg in cmd],cwd=r['directory'])
+accelerator_source=ROOT/'kits/qemu/QemuMetal/QemuMetalAccelerator.cpp'
+accelerator_obj=OUT/'QemuMetalAccelerator.o';accelerator_late=OUT/'QemuMetalAccelerator.late.o'
+run([str(accelerator_source) if str(arg)==str(source) else str(accelerator_obj) if str(arg)==str(OUT/'LegacyDisplayProbe.o') else arg for arg in cmd]
+    +['-I',str(ROOT/'drivers/NativeMetal')],cwd=r['directory'])
+base_abi=json.loads((ROOT/'scripts/data/ioaccelerator-base-abi.json').read_text())
+require(not base_abi['operational_overrides'] and base_abi['instance_bytes']==136 and base_abi['virtual_entries']==168,
+        'The audited original IOAcceleratorES: 136 bytes, 168 entries, no operational overrides')
+accelerator_bindings={'__ZN15IOAcceleratorESC2EPK11OSMetaClass':int(base_abi['protected_compatible_constructor_aliases'][0],16),
+                      '__ZN15IOAcceleratorESD2Ev':int(base_abi['nondeleting_destructor'],16),
+                      '__ZN15IOAcceleratorES10gMetaClassE':int(base_abi['metaclass'],16)}
+def undefined_symbols(data):
+    table=next(p for c,p,_ in macho(data)['commands'] if c==2);at,count,strings,_=struct.unpack_from('<4I',data,table+8);names=set()
+    for k in range(count):
+        ix,kind,_,_,_=struct.unpack_from('<IBBHQ',data,at+k*16)
+        if kind==1:names.add(data[strings+ix:data.index(b'\0',strings+ix)].decode())
+    return names
+accelerator_imports={name for name in undefined_symbols(accelerator_obj.read_bytes()) if 'IOAcceleratorES' in name}
+require(accelerator_imports<=set(accelerator_bindings),'Only the audited original IOAcceleratorES imports')
+accelerator_asm=OUT/'accelerator-bindings.S'
+accelerator_asm.write_text(''.join(f'.globl {n}\n.set {n}, {a:#x}\n' for n,a in sorted(accelerator_bindings.items()) if n in accelerator_imports))
+run(['xcrun','clang','-target','arm64-apple-ios17.0','-isysroot',sdk,'-c',accelerator_asm,'-o',OUT/'accelerator-bindings.o'])
+run([llvm/'llvm-objcopy','--remove-section=__DATA,__mod_init_func','--globalize-symbol=__GLOBAL__sub_I_QemuMetalAccelerator.cpp',
+     accelerator_obj,accelerator_late])
+require(code(accelerator_obj.read_bytes(),macho(accelerator_obj.read_bytes()))==code(accelerator_late.read_bytes(),macho(accelerator_late.read_bytes())),
+        'Owned accelerator instructions unchanged by late init staging')
 # The display backend, its probe, the key store and the HID input: sheng's boot process, log, reset, touch panel, CPU
 # frequency and GPU power objects stay out (they drive sheng hardware or need its kit and NativeAdreno).
 archive=OUT/'libNativeLegacyDisplay.late.a';archive.unlink(missing_ok=True)
@@ -222,10 +253,11 @@ run([llvm/'llvm-objcopy','--remove-section=__DATA,__mod_init_func',
 require(code((keyevents/'NativeKeyStoreEvents.o').read_bytes(),macho((keyevents/'NativeKeyStoreEvents.o').read_bytes()))==
         code(keyevents_late.read_bytes(),macho(keyevents_late.read_bytes())),'Owned event-service instructions unchanged by late init staging')
 run(['xcrun','ar','rcs',archive,late,OUT/'original-bindings.o',OUT/'LegacyDisplayProbe.o',keystore_obj,keyevents_late,
-     hid_obj,touch_obj,virtio_input_obj,shared_window_obj,hid_dir/'NativeHidInput.late.o',hid_dir/'hid-original-bindings.o'])
+     hid_obj,touch_obj,virtio_input_obj,shared_window_obj,metal_publish_obj,accelerator_late,OUT/'accelerator-bindings.o',
+     hid_dir/'NativeHidInput.late.o',hid_dir/'hid-original-bindings.o'])
 sources=[ROOT/'drivers/NativeMobileDisplay/NativeLegacyDisplay.cpp',ROOT/'drivers/NativeMobileDisplay/NativeLegacyRequest.h',source,
          keystore_source,ROOT/'drivers/NativeKeyStoreEvents/NativeKeyStoreEvents.cpp',hid_source,touch_source,virtio_input_source,
-         shared_window_source,
+         shared_window_source,metal_publish_source,accelerator_source,ROOT/'drivers/NativeMetal/OriginalAcceleratorABI.h',
          ROOT/'drivers/NativeHidInput/NativeHidInput.cpp',ROOT/'scripts/build-native-hid-input.py']
 print(run(['python3',ROOT/'scripts/build-arm-driver.py','NativeGOPPresenter'],text=True),end='')
 gop=ROOT/'build/native-gop-presenter';gop_late=gop/'NativeGOPPresenter.late.o'

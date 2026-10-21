@@ -793,6 +793,22 @@ static void handle(uint32_t op, const std::vector<unsigned char> &in, Out &out) 
     }
 }
 
+// The guest's log lines (QemuMetalRemote.cpp qemu_metal_log), into this log.
+static void drainLog() {
+    static std::string partial;
+    const uint64_t written = load(&control()->logWritten);
+    uint64_t read = control()->logRead;
+    if (written == read) return;
+    if (written - read > QM_LOG_BYTES) read = written - QM_LOG_BYTES;
+    for (; read < written; read++) {
+        const char c = (char)gWindow[QM_LOG + read % QM_LOG_BYTES];
+        if (c != '\n') {partial += c; continue;}
+        note("guest: %s", partial.c_str());
+        partial.clear();
+    }
+    store(&control()->logRead, read);
+}
+
 static void serve(uint64_t number) {
     QMRequestHeader header;
     memcpy(&header, gWindow + QM_REQUEST, sizeof header);
@@ -867,6 +883,7 @@ int main(int argc, char **argv) {
                 continue;
             }
             store(&control()->hostBeat, control()->hostBeat + 1);
+            if ((idle & 1023) == 0) drainLog();
             // Spin while the guest is busy, then poll ever more slowly.
             if (idle < 20000) {idle++; __asm__ volatile("yield");}
             else usleep(idle++ < 40000 ? 20 : 500);

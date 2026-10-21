@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <cstdarg>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -464,6 +465,27 @@ void use(NmbCommandBuffer *commandBuffer, NmbTexture *texture, bool written) {
 extern "C" void qemu_metal_set_window(void *base, uint64_t bytes) {
     gWindow = static_cast<unsigned char *>(base);
     gWindowBytes = bytes;
+}
+
+// A line into the window's log ring, which qemu-metal-host copies into its log: the guest process's own view (the plugin, missing
+// selectors, refusals) without a way into the guest. A line that does not fit in what the host has not read yet is dropped.
+extern "C" void qemu_metal_log(const char *format, ...) __attribute__((format(printf, 1, 2)));
+extern "C" void qemu_metal_log(const char *format, ...) {
+    if (!gWindow) return;
+    char line[512];
+    va_list arguments;
+    va_start(arguments, format);
+    int n = vsnprintf(line, sizeof line - 1, format, arguments);
+    va_end(arguments);
+    if (n < 0) return;
+    n = std::min<int>(n, (int)sizeof line - 2);
+    line[n++] = '\n';
+    static std::mutex lock;
+    std::lock_guard<std::mutex> guard(lock);
+    const uint64_t written = control()->logWritten;
+    if (written + (uint64_t)n - load(&control()->logRead) > QM_LOG_BYTES) return;
+    for (int i = 0; i < n; i++) gWindow[QM_LOG + (written + (uint64_t)i) % QM_LOG_BYTES] = (unsigned char)line[i];
+    store(&control()->logWritten, written + (uint64_t)n);
 }
 
 // Selectors the frontend's classes lack, with the answer that holds for every object of this device: no texture here has a swizzle (the
