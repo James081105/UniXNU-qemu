@@ -1,6 +1,8 @@
 # UniXNU-qemu
 
-Device repository for the QEMU AArch64 `virt` machine, laid out like [UniXNU-sheng](https://github.com/UniXNU/UniXNU-sheng). QEMU stands in for a tablet: the kernel, DarwinBoot and UniXNU are the same as on the boards, so they can be brought up here before a device is at hand. The kernel configuration is kept the same as `pipa_defconfig` of UniXNU-pipa.
+> **Work in progress.** iPadOS 17 boots to its home screen and Settings; see [State](#state) for what works and what does not yet.
+
+Device repository for the QEMU AArch64 `virt` machine, laid out like [UniXNU-sheng](https://github.com/UniXNU/UniXNU-sheng). QEMU stands in for a tablet: the kernel, DarwinBoot and UniXNU are the same as on the boards, so they can be brought up here before a device is at hand. The kernel configuration is kept the same as `pipa_defconfig` of [UniXNU-pipa](https://github.com/xVanTuring/UniXNU-pipa).
 
 What QEMU replaces:
 
