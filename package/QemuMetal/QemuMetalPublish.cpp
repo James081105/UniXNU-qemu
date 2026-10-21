@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Publishes QemuMetalAccelerator.cpp's accelerator when run-qemu.py --shared-window gave the guest a window (SharedWindow.cpp), from the
 // late probe, before launchd: IOGPUFamily is loaded (prelinked, but nothing else loads it), the staged classes are registered under it
-// and the accelerator is attached to the platform with the keys the original Metal discovery reads. As sheng's publishMetal
-// (UniXNU-sheng/package/GpuPowerProbe.cpp).
+// and the accelerator is attached to the platform with the keys the original Metal discovery reads, as sheng's publishMetal
+// (UniXNU-sheng/package/GpuPowerProbe.cpp). Then a grant for each other process run-qemu.py names (QemuMetalAccelerator.cpp).
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOService.h>
 #include <libkern/OSKextLib.h>
@@ -11,11 +11,13 @@
 extern "C" {
 extern volatile uint32_t native_shared_window_stage;
 extern kmod_info_t g_kernel_kmod_info;
-volatile uint32_t native_qemu_metal_stage;
+volatile uint32_t native_qemu_metal_stage, native_qemu_metal_grants;
 volatile int native_qemu_metal_status;
 void native_qemu_metal_static_init(void) __asm__("__GLOBAL__sub_I_QemuMetalAccelerator.cpp");
 IOService *native_qemu_metal_accelerator_allocate(void);
 unsigned native_qemu_metal_accelerator_instance_size(void);
+IOService *native_qemu_metal_grant_allocate(void);
+bool native_fw_cfg_read(const char *name, char *text, size_t capacity);
 void native_qemu_metal_publish(void);
 }
 
@@ -50,4 +52,20 @@ void native_qemu_metal_publish(void)
     accelerator->registerService();
     accelerator->release();
     native_qemu_metal_stage = 4;
+    // A grant for each other process that gets a device (run-qemu.py --metal-clients: names separated by commas).
+    char clients[256];
+    if (!native_fw_cfg_read("opt/org.unixnu/metal-clients", clients, sizeof clients)) return;
+    for (char *name = clients, *next; *name; name = next) {
+        for (next = name; *next && *next != ','; next++) {}
+        if (*next) *next++ = 0;
+        if (!*name) continue;
+        IOService *grant = native_qemu_metal_grant_allocate();
+        if (!grant || !grant->init()) {OSSafeReleaseNULL(grant); continue;}
+        grant->setProperty("NativeSandboxGrantProcess", name);
+        if (grant->attach(IOService::getPlatform())) {
+            grant->registerService();
+            native_qemu_metal_grants = native_qemu_metal_grants + 1;
+        }
+        grant->release();
+    }
 }

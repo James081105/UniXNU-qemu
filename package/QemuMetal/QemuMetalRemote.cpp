@@ -21,6 +21,7 @@
 #include <cstring>
 #include <ctime>
 #include <dispatch/dispatch.h>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <map>
 #include <mutex>
@@ -368,13 +369,13 @@ const char *const kFlags[] = {
     "isLargeMRTSupported", "supportsAtomicFloat", "supportsFastMathInfNaNPropagation", "supportsFloat16InfNanFiltering",
     "areProgrammableSamplePositionsSupported", "supportsLayeredRendering", "supportsMSAADepthResolve", "supportsNonPrivateMSAATextures",
     "supportsNonPrivateDepthStencilTextures", "supportsTexture2DMultisampleArray", "supportsFragmentBufferWrites", "supportsRenderTextureWrites",
-    "isFramebufferReadSupported", "supportsSIMDShuffleAndFill",
+    "isFramebufferReadSupported", "supportsSIMDShuffleAndFill", "hasUnifiedMemory",
 };
 // Counts of the base class that are no limits of the GPU, or describe objects this device does not make.
 const char *const kNotCounts[] = {
     "registryID", "deviceCreationFlags", "acceleratorPort", "currentCommandQueueCount", "commandQueueLimit", "argumentBuffersSupport",
     "commandBufferErrorOptions", "getSupportedCommandBufferErrorOptions", "maximumComputeSubstreams", "optionsForPipelineLibrarySerialization",
-    "maxConcurrentExecutingCompilationTasks", "samplerReductionModeSupport", "currentAllocatedSize", "recommendedMaxWorkingSetSize",
+    "maxConcurrentExecutingCompilationTasks", "samplerReductionModeSupport", "currentAllocatedSize",
     "maxTransferRate", "location", "locationNumber", "peerGroupID", "peerIndex", "peerCount", "maxBufferLength", "sparseTileSizeInBytes",
     "maxIOCommandsInFlight", "bufferRobustnessSupport", "maxIndirectBuffers", "maxIndirectTextures", "maxIndirectSamplers",
     "maxIndirectSamplersPerDevice", "maxAccelerationStructureLevels",
@@ -391,13 +392,31 @@ const std::pair<const char *, uint32_t> kArgumentQueries[] = {
 bool targetFamily(uint64_t family) {return family == 1001 || family == 1002 || family == 1003 || family == 3001 || family == 3002;}
 void askAnswers(NmbDevice *device) {
     std::set<std::string> flags(std::begin(kFlags), std::end(kFlags)), notCounts(std::begin(kNotCounts), std::end(kNotCounts));
+    // The memory this process's GPU work has is its slot's heap, not the Mac's: Core Image sizes its caches from these.
+    const uint64_t heap = gWindowBytes - QM_HEAP;
+    const std::pair<const char *, uint64_t> memory[] = {{"sharedMemorySize", heap}, {"recommendedMaxWorkingSetSize", heap},
+                                                        {"dedicatedMemorySize", 0}};
+    std::set<std::string> seen;
+    for (const auto &m : memory) {
+        device->selectors.push_back({m.first, NMB_ANSWER_COUNT});
+        device->answers[m.first] = m.second;
+        seen.insert(m.first);
+    }
+    // The queries of the base class, and of the IOGPU driver class the target's own device derives from (Core Image asks it for its
+    // memory sizes): the frontend's device derives from _MTLDevice alone. A process may not have loaded IOGPU yet.
+    dlopen("/System/Library/PrivateFrameworks/IOGPU.framework/IOGPU", RTLD_LAZY | RTLD_LOCAL);
     std::vector<std::pair<std::string, uint32_t>> candidates;
-    if (Class base = objc_getClass("_MTLDevice")) {
+    for (const char *className : {"_MTLDevice", "IOGPUMetalDevice"}) {
+        Class base = objc_getClass(className);
+        if (!base) continue;
         unsigned count = 0;
         Method *methods = class_copyMethodList(base, &count);
         for (unsigned i = 0; i < count; i++) {
             const char *name = sel_getName(method_getName(methods[i])), *types = method_getTypeEncoding(methods[i]);
-            if (!types || strchr(name, ':') || strcmp(types + 1, "16@0:8")) continue;
+            // IOGPU's own sizes of its kernel connection (…ShmemSize, cmdBufArgsSize) describe the driver's protocol, not the GPU.
+            if (!types || strchr(name, ':') || strcmp(types + 1, "16@0:8") || strstr(name, "Shmem") || !strcmp(name, "cmdBufArgsSize") ||
+                !seen.insert(name).second)
+                continue;
             if (strchr("QqI", types[0]) && !notCounts.count(name)) candidates.push_back({name, NMB_ANSWER_COUNT});
             else if (strchr("Bc", types[0]) && flags.count(name)) candidates.push_back({name, NMB_ANSWER_FLAG});
         }
@@ -428,6 +447,19 @@ NmbTexture *textureReply(const Reply &reply, NmbBuffer *import) {
     texture->import = import;
     return texture;
 }
+// A count, then that many NUL-terminated names.
+std::vector<std::string> names(const Reply &reply) {
+    std::vector<std::string> out;
+    const uint64_t count = replyWord(reply, 0);
+    for (size_t at = 8; out.size() < count && at < reply.data.size();) {
+        const char *name = reinterpret_cast<const char *>(reply.data.data() + at);
+        const size_t n = strnlen(name, reply.data.size() - at);
+        out.emplace_back(name, n);
+        at += n + 1;
+    }
+    return out;
+}
+NmbLibrary *libraryReply(const Reply &reply) {return new NmbLibrary{reply.handle, names(reply)};}
 QMTextureDescriptor wire(const NmbTextureDescriptor *d) {
     return {d->type, d->format, d->width, d->height, d->depth, d->levels, d->samples, d->array_length, d->usage, d->options};
 }
@@ -488,11 +520,57 @@ extern "C" void qemu_metal_log(const char *format, ...) {
     store(&control()->logWritten, written + (uint64_t)n);
 }
 
+// The Mac device's answer to an argument-less query the frontend lacks (QemuMetalPlugin.mm's gap answers).
+extern "C" bool qemu_metal_answer(const char *selector, uint64_t *value) {
+    return gDevice && nmb_device_answer(gDevice, selector, 0, value);
+}
+
+// Function stitching, which the bridge has no call for (QemuMetalPlugin.mm builds the request from MTLStitchedLibraryDescriptor):
+// the Mac's handle of a function, and a library from a QM_STITCHED_LIBRARY request, as nmb_library_new's.
+extern "C" uint64_t qemu_metal_function_handle(const void *function) {
+    return function ? static_cast<const NmbFunction *>(function)->handle : 0;
+}
+extern "C" void *qemu_metal_stitched_library(const void *payload, size_t bytes) {
+    Reply reply;
+    return call(QM_STITCHED_LIBRARY, payload, bytes, reply) ? libraryReply(reply) : nullptr;
+}
+// A library compiled on the Mac from Metal source (QemuMetalLibraries.mm): the source in the window for the request, the options and the
+// macros in the request itself.
+extern "C" void *qemu_metal_source_library(const void *source, size_t length, const QMSource *options, const void *macros, size_t macroBytes) {
+    Staging staging(length ? length : 1);
+    if (!staging.offset) return refuse<void>("the window is full");
+    memcpy(staging.data(), source, length);
+    QMSource fields = *options;
+    fields.offset = staging.offset;
+    fields.length = length;
+    std::vector<unsigned char> payload(sizeof fields);
+    memcpy(payload.data(), &fields, sizeof fields);
+    payload.insert(payload.end(), static_cast<const unsigned char *>(macros), static_cast<const unsigned char *>(macros) + macroBytes);
+    Reply reply;
+    return call(QM_SOURCE_LIBRARY, payload.data(), payload.size(), reply) ? libraryReply(reply) : nullptr;
+}
+// A library's externFunctionNames, NUL-separated into out; the count, or -1 where the Mac's library has no answer.
+extern "C" long qemu_metal_extern_names(const void *library, char *out, size_t size) {
+    if (!library) return -1;
+    const uint64_t handle = static_cast<const NmbLibrary *>(library)->handle;
+    Reply reply;
+    if (!call(QM_EXTERN_NAMES, handle, reply)) return -1;
+    size_t at = 0;
+    const std::vector<std::string> list = names(reply);
+    for (const std::string &name : list) {
+        if (at + name.size() + 1 > size) break;
+        memcpy(out + at, name.c_str(), name.size() + 1);
+        at += name.size() + 1;
+    }
+    return (long)list.size();
+}
+
 // Selectors the frontend's classes lack, with the answer that holds for every object of this device: no texture here has a swizzle (the
 // bridge's descriptor carries none), memory attribution to another process has no meaning on the Mac's GPU, and the short form of a
 // compute pipeline from a descriptor is the long one without options or reflection.
 namespace {
 uint32_t identitySwizzle(id, SEL) {return 0x05040302u;}   // MTLTextureSwizzleChannels {red, green, blue, alpha}
+bool notDrawable(id, SEL) {return false;}                 // no texture of this device is a drawable's
 void ignoreProcess(id, SEL, int) {}
 id computeWithDescriptor(id self, SEL, id descriptor, void *error) {
     return ((id (*)(id, SEL, id, uint64_t, void *, void *))objc_msgSend)(
@@ -509,7 +587,10 @@ extern "C" void qemu_metal_complete_frontend(void *device) {
     for (const char *name : {"NBTexture", "NBBuffer", "NBHeap"}) {
         Class cls = objc_getClass(name);
         if (!cls) continue;
-        if (!strcmp(name, "NBTexture")) class_addMethod(cls, sel_registerName("swizzle"), (IMP)identitySwizzle, "{?=CCCC}16@0:8");
+        if (!strcmp(name, "NBTexture")) {
+            class_addMethod(cls, sel_registerName("swizzle"), (IMP)identitySwizzle, "{?=CCCC}16@0:8");
+            class_addMethod(cls, sel_registerName("isDrawable"), (IMP)notDrawable, "B16@0:8");
+        }
         class_addMethod(cls, sel_registerName("setResponsibleProcess:"), (IMP)ignoreProcess, "v20@0:8i16");
     }
     if (Class encoder = objc_getClass("NBComputeEncoder"))
@@ -534,10 +615,13 @@ NmbDevice *nmb_device_open(const char *loader, const char *cache) {
         int file = path ? open(path, O_RDWR) : -1;
         struct stat info = {};
         if (file < 0 || fstat(file, &info)) return refuse<NmbDevice>("no window (QEMU_METAL_WINDOW)");
-        void *base = mmap(nullptr, (size_t)info.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, file, 0);
+        // Slot 0 of the file, which qemu-metal-host serves without --slot.
+        uint64_t offset = 0, bytes = 0;
+        qm_slot((uint64_t)info.st_size, 0, &offset, &bytes);
+        void *base = mmap(nullptr, (size_t)bytes, PROT_READ | PROT_WRITE, MAP_SHARED, file, (off_t)offset);
         close(file);
         if (base == MAP_FAILED) return refuse<NmbDevice>(std::string("window: ") + strerror(errno));
-        qemu_metal_set_window(base, (uint64_t)info.st_size);
+        qemu_metal_set_window(base, bytes);
     }
     if (gWindowBytes < QM_HEAP + (64ull << 20)) return refuse<NmbDevice>("window too small");
     control()->magic = QM_MAGIC;
@@ -787,16 +871,7 @@ NmbLibrary *nmb_library_new(NmbDevice *, const void *bytes, size_t length, bool 
     memcpy(staging.data(), bytes, length);
     const QMLibrary request = {staging.offset, length};
     Reply reply;
-    if (!call(QM_LIBRARY, request, reply)) return nullptr;
-    NmbLibrary *library = new NmbLibrary{reply.handle, {}};
-    const uint64_t count = replyWord(reply, 0);
-    for (size_t at = 8; library->names.size() < count && at < reply.data.size();) {
-        const char *name = reinterpret_cast<const char *>(reply.data.data() + at);
-        const size_t n = strnlen(name, reply.data.size() - at);
-        library->names.emplace_back(name, n);
-        at += n + 1;
-    }
-    return library;
+    return call(QM_LIBRARY, request, reply) ? libraryReply(reply) : nullptr;
 }
 void nmb_library_release(NmbLibrary *library) {
     if (!library) return;

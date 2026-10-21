@@ -52,7 +52,8 @@ def instruments():
     includes = ['-I', METAL, '-I', METAL / 'bridge', '-I', KIT]
     run(['xcrun', 'clang++', *FLAGS, *includes, '-c', KIT / 'QemuMetalRemote.cpp', '-o', OUT / 'QemuMetalRemote-mac.o'])
     run(['xcrun', 'clang++', *FLAGS, '-fobjc-arc', *includes, METAL / 'NativeBridgeMetalFrontend.mm', KIT / 'QemuMetalCheck.mm',
-         OUT / 'QemuMetalRemote-mac.o', '-framework', 'Foundation', '-framework', 'Metal', '-framework', 'QuartzCore',
+         KIT / 'QemuMetalLibraries.mm', KIT / 'QemuMetalGaps.mm', OUT / 'QemuMetalRemote-mac.o', '-framework', 'Foundation', '-framework', 'Metal',
+         '-framework', 'QuartzCore',
          '-framework', 'CoreGraphics', '-framework', 'CoreImage', '-framework', 'ImageIO', '-framework', 'IOSurface',
          '-o', OUT / 'qemu-metal-check'])
     return OUT / 'qemu-metal-check'
@@ -97,7 +98,7 @@ def bundle():
     run(['xcrun', 'clang++', *ios, *FLAGS, *includes, '-c', KIT / 'QemuMetalRemote.cpp', '-o', OUT / 'QemuMetalRemote-ios.o'])
     executable = BUNDLE / 'QemuMetal'
     run(['xcrun', 'clang++', *ios, *FLAGS, '-fobjc-arc', *includes, METAL / 'NativeBridgeMetalFrontend.mm', KIT / 'QemuMetalPlugin.mm',
-         OUT / 'QemuMetalRemote-ios.o', '-bundle', '-Wl,-dead_strip', '-lobjc', '-framework', 'Foundation', '-framework', 'Metal',
+         KIT / 'QemuMetalLibraries.mm', KIT / 'QemuMetalGaps.mm', OUT / 'QemuMetalRemote-ios.o', '-bundle', '-Wl,-dead_strip', '-lobjc', '-framework', 'Foundation', '-framework', 'Metal',
          '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-o', executable])
     run(['strip', '-x', executable])
     (BUNDLE / 'Info.plist').write_bytes(plistlib.dumps(dict(

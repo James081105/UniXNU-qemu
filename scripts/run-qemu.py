@@ -52,6 +52,13 @@ parser.add_argument('--metal', action='store_true',
                     help='give the guest a Metal device whose work runs on this Mac\'s GPU (package/QemuMetal): a 2 GiB '
                          'window unless --shared-window says otherwise, and qemu-metal-host serving it (build-qemu-metal.py '
                          'host), with its log in RUN_DIR/metal-host.log. The payload carries the plugin (build-qemu-metal.py guest)')
+parser.add_argument('--metal-clients', default='iconservicesagent',
+                    help='with --metal, the processes besides the render server that get a device, separated by commas (at most '
+                         'eight at a time): the kernel grants each its connection, which its sandbox would refuse. Core Image '
+                         'without Metal crashes the icon service, and Settings waits on it')
+parser.add_argument('--metal-verbose', action='store_true',
+                    help='with --metal, log every request and command of the processes besides the render server (qemu-metal-host '
+                         '--verbose for slots 1-8)')
 parser.add_argument('--accel', choices=('tcg', 'hvf'), default='tcg',
                     help='tcg emulates a Cortex-A710; hvf runs the guest on this Mac\'s CPU (Hypervisor.framework). The '
                          'payload must be built for the same accelerator: UNIXNU_QEMU_ACCEL=hvf for hvf')
@@ -170,6 +177,9 @@ if args.shared_window:
                 # package/SharedWindow.cpp finds the window here: BASE:SIZE:MODE in hexadecimal.
                 '-fw_cfg', f'name=opt/org.unixnu/shared-window,string={SHARED_WINDOW:x}:{args.shared_window << 20:x}:'
                            f'{args.shared_window_cache}']
+    if args.metal and args.metal_clients:
+        # package/QemuMetal/QemuMetalPublish.cpp publishes a grant for each.
+        command += ['-fw_cfg', f'name=opt/org.unixnu/metal-clients,string={args.metal_clients}']
 if args.os_root:
     # The whole disk image as the host sees it, read through its read-only attachment; the policy that
     # build-owner-os-policy.py signed covers exactly these bytes.
@@ -199,12 +209,15 @@ if args.os_root:
                 # Home or F1 is the Home button. QEMU sends its input to them once the driver has started them.
                 '-device', 'virtio-tablet-device', '-device', 'virtio-keyboard-device']
 (out / 'command.txt').write_text(' '.join(str(part) for part in command) + '\n')
-host = None
+hosts = []
 if args.metal:
-    # The window file exists before QEMU starts, so the host maps the same file QEMU then backs the window with.
+    # The window file exists before QEMU starts, so the hosts map the same file QEMU then backs the window with: one host for each slot
+    # (package/QemuMetal/QemuMetalWire.h), each the device of one guest process.
     with shared_ram.open('wb') as handle:
         handle.truncate(args.shared_window << 20)
-    host = subprocess.Popen([str(metal_host), '--window', str(shared_ram), '--log', str(out / 'metal-host.log')])
+    hosts = [subprocess.Popen([str(metal_host), '--window', str(shared_ram), '--slot', str(slot), '--log', str(out / 'metal-host.log')]
+                              + (['--verbose'] if args.metal_verbose and slot else []))
+             for slot in range(9)]
 process = subprocess.Popen([str(part) for part in command], stdout=open(out / 'qemu.log', 'w'), stderr=subprocess.STDOUT)
 
 
@@ -283,8 +296,9 @@ if process.poll() is None:
         process.kill()
 process.wait(timeout=30)
 shutil.rmtree(work, ignore_errors=True)
-if host:
+for host in hosts:
     host.terminate()
+for host in hosts:
     host.wait(timeout=30)
 shared_ram.unlink(missing_ok=True)
 log = (out / 'serial.log').read_bytes().decode('utf-8', 'replace')

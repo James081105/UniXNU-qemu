@@ -20,6 +20,7 @@ uint64_t mach_absolute_time(void);
 volatile uint64_t native_shared_window_base, native_shared_window_size, native_shared_window_answers;
 volatile uint32_t native_shared_window_stage;
 void native_shared_window_probe(void);
+bool native_fw_cfg_read(const char *name, char *text, size_t capacity);
 }
 
 namespace {
@@ -60,9 +61,12 @@ uint64_t hex(const char *&text) {
     }
 }
 
-// The item's text, or false: the signature must be QEMU's, as on QEMU virt.
-bool readItem(char *text, size_t capacity) {
-    uintptr_t base = ml_io_map(kFwCfg, 0x1000);
+}
+
+// The text of the fw_cfg item, or false: the signature must be QEMU's, as on QEMU virt. Also for QemuMetalPublish.cpp.
+bool native_fw_cfg_read(const char *name, char *text, size_t capacity) {
+    static uintptr_t base;
+    if (!base) base = ml_io_map(kFwCfg, 0x1000);
     if (!base) return false;
     char signature[4];
     fwSelect(base, kFwCfgSignature); fwRead(base, signature, 4);
@@ -73,7 +77,7 @@ bool readItem(char *text, size_t capacity) {
     struct { uint32_t size; uint16_t select, reserved; char name[56]; } file;
     for (uint32_t i = 0; i < count && i < 256; i++) {
         fwRead(base, &file, sizeof(file));
-        if (strncmp(file.name, "opt/org.unixnu/shared-window", sizeof(file.name))) continue;
+        if (strncmp(file.name, name, sizeof(file.name))) continue;
         size_t size = __builtin_bswap32(file.size);
         if (!size || size >= capacity) return false;
         fwSelect(base, __builtin_bswap16(file.select)); fwRead(base, text, size);
@@ -82,6 +86,8 @@ bool readItem(char *text, size_t capacity) {
     }
     return false;
 }
+
+namespace {
 
 IOMemoryMap *mapping;
 volatile Mailbox *mailbox;
@@ -114,7 +120,7 @@ void tick(OSObject *, IOTimerEventSource *source) {
 void native_shared_window_probe(void) {
     if (loop) return;
     char text[64];
-    if (!readItem(text, sizeof(text))) return;
+    if (!native_fw_cfg_read("opt/org.unixnu/shared-window", text, sizeof(text))) return;
     native_shared_window_stage = 1;
     const char *cursor = text;
     uint64_t base = hex(cursor);

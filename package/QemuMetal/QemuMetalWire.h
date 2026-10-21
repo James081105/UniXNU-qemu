@@ -13,7 +13,19 @@
 
 #define QM_MAGIC 0x4c544d51u                 // "QMTL"
 #define QM_VERSION 1u
-// The window: the kernel's mailbox (SharedWindow.cpp) keeps the first 64 KiB.
+
+// The window is cut into slots, one per process with a device: slot 0, the render server's, is half of it, and eight more share the other
+// half (128 MiB each in a 2 GiB window). The kernel maps a process its own slot only (QemuMetalAccelerator.cpp); the host serves each.
+// Every offset below is within a slot.
+#define QM_SLOTS 9u
+#define QM_SLOT_ALIGNMENT 0x4000ull
+static inline void qm_slot(uint64_t window, unsigned slot, uint64_t *offset, uint64_t *bytes) {
+    const uint64_t half = window / 2 / QM_SLOT_ALIGNMENT * QM_SLOT_ALIGNMENT;
+    const uint64_t each = (window - half) / (QM_SLOTS - 1) / QM_SLOT_ALIGNMENT * QM_SLOT_ALIGNMENT;
+    *offset = slot ? half + (slot - 1) * each : 0;
+    *bytes = slot ? each : half;
+}
+// A slot: the kernel's mailbox (SharedWindow.cpp) keeps the first 64 KiB of slot 0.
 #define QM_CONTROL 0x10000ull
 #define QM_REQUEST 0x20000ull
 #define QM_REQUEST_BYTES 0x70000ull
@@ -72,8 +84,11 @@ enum QMOp {
     QM_FENCE,                    // nothing -> handle
     QM_COMMIT,                   // QMCommit
     QM_LINEAR_BYTES_PER_ROW,     // QMHandleValue {format, width} -> uint64_t
+    QM_STITCHED_LIBRARY,         // QMStitched, its function handles, its graphs -> handle, uint64_t count, then the names (QM_LIBRARY's)
+    QM_EXTERN_NAMES,             // uint64_t library -> uint64_t count, then count NUL-terminated names (externFunctionNames)
+    QM_SOURCE_LIBRARY,           // QMSource, then its macros -> handle, uint64_t count, then the names (QM_LIBRARY's)
 };
-enum {QM_FAILED = -1, QM_UNKNOWN = -2};
+enum {QM_FAILED = -1, QM_UNKNOWN = -2, QM_NOT_FOUND = -3};   // QM_NOT_FOUND: a function name the library has not (its text is Metal's)
 
 struct QMOpen {uint64_t session, windowBytes;};
 struct QMDeviceInfo {
@@ -114,6 +129,16 @@ struct QMStencil {uint64_t compare, failure, depthFailure, pass, readMask, write
 struct QMDepthStencil {uint64_t compare, write; QMStencil front, back;};
 // The command buffer's commands (QMCommand records) are the window's bytes [offset, offset + length).
 struct QMCommit {uint64_t queue, commandBuffer, offset, length;};
+// A stitched library (MTLStitchedLibraryDescriptor): the function handles, then each graph, a QMStitchGraph, its name (padded to 8), then
+// its nodes, each a QMStitchNode, its name (padded), its arguments and its control dependencies (uint64_t each). An argument is a node's
+// index, or QM_STITCH_INPUT | the graph argument's index. Nodes not in the graph's own list (listed 0) are only reached through others.
+// A library compiled from Metal source (newLibraryWithSource:options:error:): the source is the window's bytes [offset, offset + length);
+// the preprocessor macros follow as NUL-terminated "NAME=VALUE" texts (macros of them). languageVersion 0 leaves the compiler's.
+struct QMSource {uint64_t offset, length, fastMath, languageVersion, macros;};
+struct QMStitched {uint64_t functions, graphs;};
+struct QMStitchGraph {uint64_t nameBytes, nodes, output, inlined;};
+struct QMStitchNode {uint64_t nameBytes, arguments, dependencies, listed;};
+#define QM_STITCH_INPUT (1ull << 63)
 
 // ---- commands: QMCommandHeader, then the command's fields; bytes counts the header and is a multiple of 8 ----
 struct QMCommandHeader {uint32_t op, bytes;};

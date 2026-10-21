@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// qemu-metal-host: the Mac side of the guest's Metal device (QemuMetalRemote.cpp). It maps the memory window QEMU shares with the guest
-// (run-qemu.py --shared-window: RUN_DIR/shared.bin), answers the guest's requests (QemuMetalWire.h) with this Mac's Metal device, and runs
-// the guest's command buffers on this Mac's GPU.
+// qemu-metal-host: the Mac side of the guest's Metal device (QemuMetalRemote.cpp). It maps one slot of the memory window QEMU shares with
+// the guest (run-qemu.py --shared-window: RUN_DIR/shared.bin; QemuMetalWire.h qm_slot), answers the requests of the guest process that owns
+// the slot with this Mac's Metal device, and runs that process's command buffers on this Mac's GPU. run-qemu.py --metal runs one per slot.
 //
-//   qemu-metal-host --window RUN_DIR/shared.bin [--log FILE]
+//   qemu-metal-host --window RUN_DIR/shared.bin [--slot N] [--log FILE] [--verbose]
 //
-// The window's heap is one MTLBuffer over the mapped file, so a guest buffer is that buffer at the guest's offset, and a texture over guest
+// The slot's heap is one MTLBuffer over the mapped file, so a guest buffer is that buffer at the guest's offset, and a texture over guest
 // bytes (an IOSurface's shadow) is a linear texture on it: the GPU reads and writes the guest's memory where it lies. Libraries arrive as
 // the guest's metallib files; an iPadOS library is universal, and its AIR slice (kits/AirNir/Library.h) is what this Mac compiles.
 #import <Foundation/Foundation.h>
@@ -32,6 +32,7 @@ static id<MTLDevice> gDevice;
 static id<MTLBuffer> gHeap;                         // the window from QM_HEAP
 static id<MTLCommandQueue> gUtility;               // replaceRegion / getBytes
 static FILE *gLog;
+static unsigned gSlot;                             // --slot: the window's slot this process serves
 static bool gVerbose;                              // --verbose: every request and command
 static std::unordered_map<uint64_t, id> gObjects;
 static uint64_t gNextHandle = 1;
@@ -51,11 +52,11 @@ static void note(const char *format, ...) {
     char text[1024];
     vsnprintf(text, sizeof text, format, arguments);
     va_end(arguments);
-    fprintf(gLog, "%.3f %s\n", [NSDate timeIntervalSinceReferenceDate], text);
+    fprintf(gLog, "%.3f [%u] %s\n", [NSDate timeIntervalSinceReferenceDate], gSlot, text);
     fflush(gLog);
 }
 
-struct Failure {std::string why;};
+struct Failure {std::string why; int32_t status = QM_FAILED;};
 [[noreturn]] static void refuse(const std::string &why) {throw Failure{why};}
 template <class T> static T object(uint64_t handle, const char *what) {
     auto it = gObjects.find(handle);
@@ -485,7 +486,11 @@ static void commit(const QMCommit &c) {
             QMCommandHeader header;
             memcpy(&header, gWindow + c.offset + at, sizeof header);
             if (header.bytes < sizeof header || header.bytes > c.length - at) refuse("bad command length");
-            if (gVerbose) note("  command %u (%u bytes)", header.op, header.bytes);
+            if (gVerbose) {
+                const uint64_t *w = (const uint64_t *)(gWindow + c.offset + at + sizeof header);
+                const unsigned words = (header.bytes - (uint32_t)sizeof header) / 8;
+                note("  command %u (%u bytes) %llx %llx %llx", header.op, header.bytes, words > 0 ? w[0] : 0, words > 1 ? w[1] : 0, words > 2 ? w[2] : 0);
+            }
             encode(e, header.op, gWindow + c.offset + at + sizeof header, header.bytes - (uint32_t)sizeof header);
             at += header.bytes;
         }
@@ -525,6 +530,7 @@ static id<MTLLibrary> library(const unsigned char *bytes, uint64_t length) {
     NSError *error = nil;
     id<MTLLibrary> made = [gDevice newLibraryWithData:data error:&error];
     if (!made) refuse(error.localizedDescription.UTF8String ?: "library refused");
+    made.label = [NSString stringWithFormat:@"%zu bytes", (size_t)length];
     gLibraries[key] = made;
     note("library %zu bytes: %lu functions", (size_t)length, (unsigned long)made.functionNames.count);
     return made;
@@ -566,13 +572,15 @@ static void handle(uint32_t op, const std::vector<unsigned char> &in, Out &out) 
         QMAnswerRequest request = fields<QMAnswerRequest>(in);
         request.selector[sizeof request.selector - 1] = 0;
         uint64_t value = 0;
-        if (!answerSelector(request.selector, true, request.argument, value)) throw QM_UNKNOWN;
+        if (!answerSelector(request.selector, true, request.argument, value)) throw Failure{"", QM_UNKNOWN};
         out.word(value);
         break;
     }
     case QM_TEXTURE: {
         id<MTLTexture> texture = [gDevice newTextureWithDescriptor:textureDescriptor(fields<QMTexture>(in).descriptor)];
         out.handle = keep(texture, "texture");
+        if (gVerbose) note("  texture %llu: format %lu %lux%lu storage %lu usage %lu", out.handle, (unsigned long)texture.pixelFormat,
+                           (unsigned long)texture.width, (unsigned long)texture.height, (unsigned long)texture.storageMode, (unsigned long)texture.usage);
         describe(texture, out);
         break;
     }
@@ -584,6 +592,8 @@ static void handle(uint32_t op, const std::vector<unsigned char> &in, Out &out) 
         const uint64_t offset = heapOffset(f.offset, f.bytesPerRow * d.height);
         id<MTLTexture> texture = [gHeap newTextureWithDescriptor:d offset:offset bytesPerRow:f.bytesPerRow];
         out.handle = keep(texture, "texture over the window");
+        if (gVerbose) note("  texture %llu over %llx: format %lu %lux%lu row %llu usage %lu", out.handle, f.offset, (unsigned long)texture.pixelFormat,
+                           (unsigned long)texture.width, (unsigned long)texture.height, f.bytesPerRow, (unsigned long)texture.usage);
         describe(texture, out);
         break;
     }
@@ -614,6 +624,14 @@ static void handle(uint32_t op, const std::vector<unsigned char> &in, Out &out) 
                 destinationOffset:offset destinationBytesPerRow:f.bytesPerRow destinationBytesPerImage:image];
         [blit endEncoding];
         waitUtility(commandBuffer);
+        if (gVerbose) {
+            uint64_t nonzero = 0;
+            for (uint64_t i = 0; i < f.length; i++) nonzero += gWindow[f.offset + i] != 0;
+            note("  %s texture %llu: format %lu %lux%lu storage %lu usage %lu, region %llux%llu, %llu of %llu bytes nonzero",
+                 op == QM_TEXTURE_REPLACE ? "replace" : "get bytes", f.texture, (unsigned long)texture.pixelFormat, (unsigned long)texture.width,
+                 (unsigned long)texture.height, (unsigned long)texture.storageMode, (unsigned long)texture.usage, f.region[3], f.region[4], nonzero,
+                 f.length);
+        }
         break;
     }
     case QM_LIBRARY: {
@@ -623,6 +641,108 @@ static void handle(uint32_t op, const std::vector<unsigned char> &in, Out &out) 
         NSArray<NSString *> *names = made.functionNames;
         out.word(names.count);
         for (NSString *name in names) out.append(name.UTF8String, strlen(name.UTF8String) + 1);
+        break;
+    }
+    case QM_STITCHED_LIBRARY: {
+        // The guest's graphs, rebuilt from QemuMetalLibraries.mm's request, stitched from this Mac's functions.
+        size_t at = 0;
+        auto take = [&](size_t n) {
+            if (at + n > in.size()) refuse("short stitching request");
+            const unsigned char *p = in.data() + at;
+            at = (at + n + 7) / 8 * 8;
+            return p;
+        };
+        auto word = [&] {return *(const uint64_t *)take(8);};
+        const QMStitched header = *(const QMStitched *)take(sizeof(QMStitched));
+        NSMutableArray<id<MTLFunction>> *functions = [NSMutableArray array];
+        for (uint64_t i = 0; i < header.functions; i++) [functions addObject:object<id<MTLFunction>>(word(), "stitchable function")];
+        NSMutableArray<MTLFunctionStitchingGraph *> *graphs = [NSMutableArray array];
+        for (uint64_t g = 0; g < header.graphs; g++) {
+            const QMStitchGraph graph = *(const QMStitchGraph *)take(sizeof(QMStitchGraph));
+            NSString *name = @((const char *)take(graph.nameBytes));
+            if (graph.output >= graph.nodes) refuse("stitching output node out of range");
+            NSMutableArray<MTLFunctionStitchingFunctionNode *> *nodes = [NSMutableArray array], *listed = [NSMutableArray array];
+            std::vector<std::vector<uint64_t>> arguments, dependencies;
+            for (uint64_t n = 0; n < graph.nodes; n++) {
+                const QMStitchNode node = *(const QMStitchNode *)take(sizeof(QMStitchNode));
+                MTLFunctionStitchingFunctionNode *made = [[MTLFunctionStitchingFunctionNode alloc] initWithName:@((const char *)take(node.nameBytes))
+                                                                                                      arguments:@[] controlDependencies:@[]];
+                arguments.emplace_back();
+                for (uint64_t a = 0; a < node.arguments; a++) arguments.back().push_back(word());
+                dependencies.emplace_back();
+                for (uint64_t d = 0; d < node.dependencies; d++) dependencies.back().push_back(word());
+                [nodes addObject:made];
+                if (node.listed) [listed addObject:made];
+            }
+            for (uint64_t n = 0; n < graph.nodes; n++) {
+                NSMutableArray *nodeArguments = [NSMutableArray array];
+                for (uint64_t a : arguments[n]) {
+                    if (a & QM_STITCH_INPUT) [nodeArguments addObject:[[MTLFunctionStitchingInputNode alloc] initWithArgumentIndex:a & ~QM_STITCH_INPUT]];
+                    else if (a < graph.nodes) [nodeArguments addObject:nodes[a]];
+                    else refuse("stitching argument out of range");
+                }
+                NSMutableArray *nodeDependencies = [NSMutableArray array];
+                for (uint64_t d : dependencies[n]) {
+                    if (d >= graph.nodes) refuse("stitching dependency out of range");
+                    [nodeDependencies addObject:nodes[d]];
+                }
+                nodes[n].arguments = nodeArguments;
+                nodes[n].controlDependencies = nodeDependencies;
+            }
+            NSArray *attributes = graph.inlined ? @[[MTLFunctionStitchingAttributeAlwaysInline new]] : @[];
+            [graphs addObject:[[MTLFunctionStitchingGraph alloc] initWithFunctionName:name nodes:listed outputNode:nodes[graph.output]
+                                                                           attributes:attributes]];
+        }
+        MTLStitchedLibraryDescriptor *descriptor = [MTLStitchedLibraryDescriptor new];
+        descriptor.functions = functions;
+        descriptor.functionGraphs = graphs;
+        NSError *error = nil;
+        id<MTLLibrary> made = [gDevice newLibraryWithStitchedDescriptor:descriptor error:&error];
+        if (!made) refuse([NSString stringWithFormat:@"stitched library: %@", error.localizedDescription ?: @"refused"].UTF8String);
+        note("stitched %s from %lu functions", graphs.firstObject.functionName.UTF8String ?: "?", (unsigned long)functions.count);
+        out.handle = keep(made, "stitched library");
+        NSArray<NSString *> *names = made.functionNames;
+        out.word(names.count);
+        for (NSString *n in names) out.append(n.UTF8String, strlen(n.UTF8String) + 1);
+        break;
+    }
+    case QM_SOURCE_LIBRARY: {
+        // Metal source the guest's Core Image wrote for a filter graph, compiled by this Mac's compiler.
+        const QMSource &f = fields<QMSource>(in);
+        NSString *source = [[NSString alloc] initWithBytes:gWindow + QM_HEAP + heapOffset(f.offset, f.length) length:f.length
+                                                  encoding:NSUTF8StringEncoding];
+        if (!source) refuse("source is not UTF-8");
+        MTLCompileOptions *options = [MTLCompileOptions new];
+        options.mathMode = f.fastMath ? MTLMathModeFast : MTLMathModeSafe;
+        if (f.languageVersion) options.languageVersion = (MTLLanguageVersion)f.languageVersion;
+        NSMutableDictionary *macros = [NSMutableDictionary dictionary];
+        size_t at = sizeof f;
+        for (uint64_t i = 0; i < f.macros && at < in.size(); i++) {
+            const char *text = (const char *)in.data() + at;
+            at += strnlen(text, in.size() - at) + 1;
+            const char *equals = strchr(text, '=');
+            if (!equals) continue;
+            macros[[[NSString alloc] initWithBytes:text length:(NSUInteger)(equals - text) encoding:NSUTF8StringEncoding]] = @(equals + 1);
+        }
+        if (macros.count) options.preprocessorMacros = macros;
+        NSError *error = nil;
+        id<MTLLibrary> made = [gDevice newLibraryWithSource:source options:options error:&error];
+        if (!made) refuse([NSString stringWithFormat:@"source library: %@", error.localizedDescription ?: @"refused"].UTF8String);
+        made.label = [NSString stringWithFormat:@"source of %llu bytes", f.length];
+        note("compiled source of %llu bytes: %lu functions", f.length, (unsigned long)made.functionNames.count);
+        out.handle = keep(made, "source library");
+        NSArray<NSString *> *names = made.functionNames;
+        out.word(names.count);
+        for (NSString *n in names) out.append(n.UTF8String, strlen(n.UTF8String) + 1);
+        break;
+    }
+    case QM_EXTERN_NAMES: {
+        id<MTLLibrary> owner = object<id<MTLLibrary>>(fields<uint64_t>(in), "library");
+        SEL selector = sel_registerName("externFunctionNames");
+        if (![owner respondsToSelector:selector]) throw Failure{"", QM_UNKNOWN};
+        NSArray<NSString *> *names = ((NSArray<NSString *> * (*)(id, SEL))objc_msgSend)(owner, selector);
+        out.word(names.count);
+        for (NSString *n in names) out.append(n.UTF8String, strlen(n.UTF8String) + 1);
         break;
     }
     case QM_FUNCTION: {
@@ -636,8 +756,10 @@ static void handle(uint32_t op, const std::vector<unsigned char> &in, Out &out) 
             return p;
         };
         NSString *name = [NSString stringWithUTF8String:(const char *)take(f.nameBytes)];
+        if (gVerbose) note("  function %s in %s, %llu constants", name.UTF8String, owner.label.UTF8String ?: "?", f.constants);
         id<MTLFunction> function = nil;
         NSError *error = nil;
+        NSMutableString *constants = [NSMutableString string];   // for a refusal's text
         if (!f.constants) function = [owner newFunctionWithName:name];
         else {
             MTLFunctionConstantValues *values = [MTLFunctionConstantValues new];
@@ -647,10 +769,19 @@ static void handle(uint32_t op, const std::vector<unsigned char> &in, Out &out) 
                 const void *value = take(c.valueBytes);
                 if (constantName) [values setConstantValue:value type:(MTLDataType)c.type withName:@(constantName)];
                 else [values setConstantValue:value type:(MTLDataType)c.type atIndex:c.index];
+                [constants appendFormat:@" %s:%llu", constantName ?: [NSString stringWithFormat:@"#%llu", c.index].UTF8String, c.type];
             }
             function = [owner newFunctionWithName:name constantValues:values error:&error];
         }
-        if (!function) refuse([NSString stringWithFormat:@"function %@: %@", name, error.localizedDescription ?: @"not in the library"].UTF8String);
+        // Metal's own text for a name the library has not (QemuMetalLibraries.mm makes it Metal's error again: Core Image goes on to its
+        // next library only on that one).
+        if (!function && !error) {
+            if (gVerbose) note("  not in %s", owner.label.UTF8String ?: "?");
+            throw Failure{[NSString stringWithFormat:@"Function %@ was not found in the library", name].UTF8String, QM_NOT_FOUND};
+        }
+        if (!function)
+            refuse([NSString stringWithFormat:@"function %@ (library of %lu functions%@%@): %@", name, (unsigned long)owner.functionNames.count,
+                    owner.label ? @", " : @"", owner.label ?: @"", error.localizedDescription].UTF8String + std::string(constants.UTF8String));
         out.handle = keep(function, "function");
         out.word((uint64_t)function.functionType);
         break;
@@ -710,6 +841,7 @@ static void handle(uint32_t op, const std::vector<unsigned char> &in, Out &out) 
         if (f.maxCallStackDepth) d.maxCallStackDepth = f.maxCallStackDepth;
         for (unsigned i = 0; i < 31; i++) if (f.mutability[i]) d.buffers[i].mutability = (MTLMutability)f.mutability[i];
         NSError *error = nil;
+        if (gVerbose) note("  compute pipeline %s", d.computeFunction.name.UTF8String);
         id<MTLComputePipelineState> pipeline = [gDevice newComputePipelineStateWithDescriptor:d options:MTLPipelineOptionNone reflection:nil error:&error];
         if (!pipeline) refuse([NSString stringWithFormat:@"compute pipeline %@: %@", d.computeFunction.name, error.localizedDescription].UTF8String);
         out.handle = keep(pipeline, "compute pipeline");
@@ -809,29 +941,38 @@ static void drainLog() {
     store(&control()->logRead, read);
 }
 
+// The request's refusal is caught here, in the innermost frame: a C++ exception unwinding through an Objective-C @try frame was not
+// caught at all (the host aborted on an unknown device query).
+static Failure attempt(uint32_t op, const std::vector<unsigned char> &in, Out &out) {
+    try {
+        handle(op, in, out);
+        return Failure{"", 0};
+    } catch (Failure &f) {
+        return f;
+    }
+}
+
 static void serve(uint64_t number) {
     QMRequestHeader header;
     memcpy(&header, gWindow + QM_REQUEST, sizeof header);
     std::vector<unsigned char> in;
     if (header.bytes <= QM_REQUEST_BYTES - sizeof header) in.assign(gWindow + QM_REQUEST + sizeof header, gWindow + QM_REQUEST + sizeof header + header.bytes);
     Out out;
-    int32_t status = 0;
+    Failure result;
     @autoreleasepool {
-        try {
-            @try {
-                handle(header.op, in, out);
-            } @catch (NSException *exception) {
-                refuse(std::string("exception: ") + (exception.reason.UTF8String ?: "?"));
-            }
-        } catch (Failure &f) {
-            status = QM_FAILED;
-            out = Out();
-            out.append(f.why.data(), f.why.size());
+        @try {
+            result = attempt(header.op, in, out);
+        } @catch (NSException *exception) {
+            result = Failure{std::string("exception: ") + (exception.reason.UTF8String ?: "?")};
+        }
+    }
+    int32_t status = result.status;
+    if (status) {
+        out = Out();
+        out.append(result.why.data(), result.why.size());
+        if (status == QM_FAILED) {
             gCount.failures++;
-            note("request %u refused: %s", header.op, f.why.c_str());
-        } catch (int code) {
-            status = code;
-            out = Out();
+            note("request %u refused: %s", header.op, result.why.c_str());
         }
     }
     gCount.requests++;
@@ -852,18 +993,27 @@ static void serve(uint64_t number) {
 int main(int argc, char **argv) {
     @autoreleasepool {
         const char *path = nullptr, *logPath = nullptr;
+        unsigned slot = 0;
         for (int i = 1; i < argc; i++) {
             if (!strcmp(argv[i], "--verbose")) gVerbose = true;
             else if (i + 1 < argc && !strcmp(argv[i], "--window")) path = argv[++i];
             else if (i + 1 < argc && !strcmp(argv[i], "--log")) logPath = argv[++i];
+            else if (i + 1 < argc && !strcmp(argv[i], "--slot")) slot = (unsigned)atoi(argv[++i]);
         }
         gLog = logPath ? fopen(logPath, "a") : stderr;
-        if (!path || !gLog) {fprintf(stderr, "usage: qemu-metal-host --window RUN_DIR/shared.bin [--log FILE]\n"); return 2;}
+        if (!path || !gLog || slot >= QM_SLOTS) {
+            fprintf(stderr, "usage: qemu-metal-host --window RUN_DIR/shared.bin [--slot N] [--log FILE]\n");
+            return 2;
+        }
+        gSlot = slot;
         int file = open(path, O_RDWR);
         struct stat info = {};
-        if (file < 0 || fstat(file, &info) || (uint64_t)info.st_size < QM_HEAP + (64ull << 20)) {note("no window at %s", path); return 1;}
-        gWindowBytes = (uint64_t)info.st_size;
-        gWindow = (unsigned char *)mmap(nullptr, gWindowBytes, PROT_READ | PROT_WRITE, MAP_SHARED, file, 0);
+        if (file < 0 || fstat(file, &info)) {note("no window at %s", path); return 1;}
+        // This process serves one slot (QemuMetalWire.h): one guest process's device. run-qemu.py --metal runs one for each.
+        uint64_t offset = 0;
+        qm_slot((uint64_t)info.st_size, slot, &offset, &gWindowBytes);
+        if (gWindowBytes < QM_HEAP + (64ull << 20)) {note("slot %u of %s is too small", slot, path); return 1;}
+        gWindow = (unsigned char *)mmap(nullptr, gWindowBytes, PROT_READ | PROT_WRITE, MAP_SHARED, file, (off_t)offset);
         close(file);
         if (gWindow == MAP_FAILED) {note("mmap: %s", strerror(errno)); return 1;}
         gDevice = MTLCreateSystemDefaultDevice();
@@ -871,8 +1021,8 @@ int main(int argc, char **argv) {
         gUtility = [gDevice newCommandQueue];
         gLibraries = [NSMutableDictionary dictionary];
         if (!gDevice || !gHeap || !gUtility) {note("no Metal device or heap buffer over the window"); return 1;}
-        note("serving %s: %llu MiB window, %s, heap at GPU address %llx", path, (unsigned long long)(gWindowBytes >> 20),
-             gDevice.name.UTF8String, (unsigned long long)gHeap.gpuAddress);
+        note("serving %s at %llu MiB: %llu MiB, %s, heap at GPU address %llx", path, (unsigned long long)(offset >> 20),
+             (unsigned long long)(gWindowBytes >> 20), gDevice.name.UTF8String, (unsigned long long)gHeap.gpuAddress);
         uint64_t answered = load(&control()->reply), lastReport = 0;
         for (unsigned idle = 0;;) {
             const uint64_t request = load(&control()->request);

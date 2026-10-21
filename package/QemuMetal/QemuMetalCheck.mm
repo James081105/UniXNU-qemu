@@ -2,9 +2,9 @@
 // Host instrument (scripts/build-qemu-metal.py check): this Mac's QuartzCore renders one layer tree twice through CARenderer, once on this
 // Mac's own Metal device and once on NativeMetal's frontend over QemuMetalRemote.cpp (the window, qemu-metal-host, this Mac's GPU again),
 // and the two pictures must agree. The tree takes the renderer's usual paths: solid layers, opacity, rounded corners and borders, a shadow,
-// an image's contents (a texture upload) and text. No Core Image filter: on this Mac a layer's CIFilter goes through Core Image's stitched
-// functions, which iPadOS's render server does not use for its own effects. The Mac's QuartzCore is not the guest's: this checks the wire
-// and the host, not iPadOS.
+// an image's contents (a texture upload) and text. No Core Image filter: this Mac's Core Image takes newer paths than iPadOS 17's (Metal
+// Performance Shaders for a blur, newLibraryWithDescriptor: for its kernels), so iPadOS's library paths (QemuMetalLibraries.mm) are not what it
+// would check. The Mac's QuartzCore is not the guest's: this checks the wire and the host, not iPadOS.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
@@ -123,44 +123,14 @@ static void save(const std::vector<uint8_t> &pixels, NSUInteger side, const char
 
 static void onMissing(const char *cls, const char *sel) {std::fprintf(stderr, "missing selector: %s %s\n", cls, sel);}
 extern "C" void qemu_metal_complete_frontend(void *device);
+extern "C" bool qemu_metal_answer(const char *selector, uint64_t *value);
+extern "C" void qemu_metal_add_libraries(Class device);
+extern "C" void qemu_metal_answer_gaps(Class cls);
 // Device queries this Mac's QuartzCore sends that the frontend's device (the guest's) does not answer: every argument-less count of this
 // Mac's own device class it lacks answers as this Mac's device does. Feature flags stay the device's own (QemuMetalRemote.cpp kFlags): a
 // flag answered YES here sends the renderer to objects the frontend does not make (tile pipelines). Instrument only.
 static id gMacDevice;
 static NSUInteger macCount(id, SEL selector) {return ((NSUInteger (*)(id, SEL))objc_msgSend)(gMacDevice, selector);}
-// Every other selector the frontend's objects lack is listed once and answered with zero (QEMU_METAL_DISCOVER=1), so one run names every gap
-// on this Mac's renderer path; without it a gap raises, as on the guest. Results after a zero answer mean nothing.
-static std::set<std::string> gGaps;
-static const char *protocolTypes(SEL selector) {
-    Protocol *protocols[] = {@protocol(MTLDevice), @protocol(MTLTexture), @protocol(MTLBuffer), @protocol(MTLResource), @protocol(MTLCommandQueue),
-                             @protocol(MTLCommandBuffer), @protocol(MTLRenderCommandEncoder), @protocol(MTLBlitCommandEncoder),
-                             @protocol(MTLComputeCommandEncoder), @protocol(MTLCommandEncoder), @protocol(MTLLibrary), @protocol(MTLFunction),
-                             @protocol(MTLRenderPipelineState), @protocol(MTLComputePipelineState), @protocol(MTLSamplerState),
-                             @protocol(MTLDepthStencilState), @protocol(MTLHeap), @protocol(MTLFence), @protocol(MTLEvent), @protocol(MTLSharedEvent)};
-    for (Protocol *p : protocols)
-        for (BOOL required : {YES, NO}) {
-            objc_method_description m = protocol_getMethodDescription(p, selector, required, YES);
-            if (m.types) return m.types;
-        }
-    return nullptr;
-}
-static NSMethodSignature *gapSignature(id self, SEL, SEL selector) {
-    if (Method m = class_getInstanceMethod(object_getClass(self), selector)) return [NSMethodSignature signatureWithObjCTypes:method_getTypeEncoding(m)];
-    const char *types = protocolTypes(selector);
-    std::string guess = "Q@:";   // Apple SPI: words in, a word out
-    for (const char *c = sel_getName(selector); *c; c++) if (*c == ':') guess += "Q";
-    return [NSMethodSignature signatureWithObjCTypes:types ?: guess.c_str()];
-}
-static void gapForward(id self, SEL, NSInvocation *invocation) {
-    const std::string gap = std::string(class_getName(object_getClass(self))) + " " + sel_getName(invocation.selector);
-    if (gGaps.insert(gap).second) std::fprintf(stderr, "gap: %s\n", gap.c_str());
-    const NSUInteger length = invocation.methodSignature.methodReturnLength;
-    if (length) {std::vector<uint8_t> zero(length); [invocation setReturnValue:zero.data()];}
-}
-static void discoverGaps(Class cls) {
-    class_addMethod(cls, @selector(methodSignatureForSelector:), (IMP)gapSignature, "@@::");
-    class_addMethod(cls, @selector(forwardInvocation:), (IMP)gapForward, "v@:@");
-}
 // The frontend refuses a pipeline with an error and no log; the instrument prints the error.
 static IMP gComputeWithDescriptor;
 static id loggedCompute(id self, SEL cmd, MTLComputePipelineDescriptor *d, MTLPipelineOption options, id *reflection, NSError **error) {
@@ -171,7 +141,9 @@ static id loggedCompute(id self, SEL cmd, MTLComputePipelineDescriptor *d, MTLPi
     return made;
 }
 static void answerMacQueries(id device) {
-    if (getenv("QEMU_METAL_DISCOVER")) {discoverGaps(objc_getClass("NBObject")); discoverGaps(object_getClass(device));}
+    // The selectors the frontend lacks are answered as on the guest (QemuMetalGaps.mm), named in the host's log.
+    qemu_metal_answer_gaps(objc_getClass("NBObject"));
+    qemu_metal_answer_gaps(object_getClass(device));
     Method compute = class_getInstanceMethod(object_getClass(device), @selector(newComputePipelineStateWithDescriptor:options:reflection:error:));
     gComputeWithDescriptor = method_setImplementation(compute, (IMP)loggedCompute);
     for (Class cls = object_getClass(gMacDevice); cls && cls != [NSObject class]; cls = class_getSuperclass(cls)) {
@@ -197,6 +169,7 @@ int main(int argc, char **argv) {
         id<MTLDevice> remote = native_bridge_metal_open("", argv[1], 0x716d746c, onMissing);
         if (!remote) {std::printf("FAIL no remote device\n"); return 1;}
         qemu_metal_complete_frontend((__bridge void *)remote);
+        qemu_metal_add_libraries(object_getClass(remote));
         answerMacQueries(remote);
         std::vector<uint8_t> actual = render(remote, side);
         if (expected.empty() || actual.empty()) {std::printf("FAIL nothing rendered (%s)\n", expected.empty() ? "Mac" : "remote"); return 1;}
@@ -209,6 +182,36 @@ int main(int argc, char **argv) {
             if (most > 8) differ++;
             worst = std::max(worst, most);
             if (!actual[i + 3]) blank++;
+        }
+        // A kernel from Metal source (QemuMetalLibraries.mm compiles it on the host), as iPadOS's Core Image writes one for a filter graph.
+        {
+            NSError *error = nil;
+            id<MTLLibrary> library = [remote newLibraryWithSource:@"kernel void fill(device uint *out [[buffer(0)]], uint i [[thread_position_in_grid]])"
+                                                                   " { out[i] = i * 3u + SHIFT; }"
+                                                          options:[&] {MTLCompileOptions *o = [MTLCompileOptions new]; o.preprocessorMacros = @{@"SHIFT": @"7"}; return o;}()
+                                                            error:&error];
+            id<MTLFunction> function = [library newFunctionWithName:@"fill"];
+            id<MTLComputePipelineState> pipeline = function ? [remote newComputePipelineStateWithFunction:function error:&error] : nil;
+            id<MTLBuffer> buffer = [remote newBufferWithLength:256 * 4 options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> commandBuffer = [[remote newCommandQueue] commandBuffer];
+            id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+            [encoder setComputePipelineState:pipeline];
+            [encoder setBuffer:buffer offset:0 atIndex:0];
+            [encoder dispatchThreads:MTLSizeMake(256, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            [encoder endEncoding];
+            [commandBuffer commit];
+            [commandBuffer waitUntilCompleted];
+            const uint32_t *words = (const uint32_t *)buffer.contents;
+            bool right = pipeline != nil;
+            for (uint32_t i = 0; right && i < 256; i++) right = words[i] == i * 3 + 7;
+            if (!right) {std::printf("FAIL the kernel from source: %s\n", error.localizedDescription.UTF8String ?: "wrong values"); return 1;}
+        }
+        // A query this Mac's device does not answer is refused as unknown, and the host keeps serving.
+        uint64_t unknown = 0;
+        if (qemu_metal_answer("noSuchDeviceQuery", &unknown)) {std::printf("FAIL an unknown query was answered\n"); return 1;}
+        if (!qemu_metal_answer("maxThreadgroupMemoryLength", &unknown) || !unknown) {
+            std::printf("FAIL the host stopped answering after an unknown query\n");
+            return 1;
         }
         char status[512];
         native_bridge_metal_status(status, sizeof status);
