@@ -35,6 +35,9 @@ parser.add_argument('--native-user', action='store_true',
 parser.add_argument('--os-root', action='store_true',
                     help='attach the OS disk image of the IPSW read-only as a VirtIO block device, the root of a kernel '
                          'built with qemu_root_defconfig (scripts/build-os-root.py)')
+parser.add_argument('--accel', choices=('tcg', 'hvf'), default='tcg',
+                    help='tcg emulates a Cortex-A710; hvf runs the guest on this Mac\'s CPU (Hypervisor.framework). The '
+                         'payload must be built for the same accelerator: UNIXNU_QEMU_ACCEL=hvf for hvf')
 args = parser.parse_args()
 if args.native_user and args.os_root:
     parser.error('--native-user boots from md0; leave out --os-root')
@@ -63,6 +66,26 @@ if 'Payloads/DarwinBoot.efi' not in config:
     raise SystemExit('the payload does not load DarwinBoot as a driver; board.toml [payload] loader must not be "firmware"')
 shutil.copyfile(darwinboot, esp / 'EFI/UniXNU/Payloads/DarwinBoot.efi')
 
+spec = importlib.util.spec_from_file_location('make_qemu_adt', ROOT / 'scripts/make-qemu-adt.py')
+adt_tool = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(adt_tool)
+adt = esp / 'EFI/UniXNU/Payloads/kernel.macho.adt'
+tree, _ = adt_tool.parse(adt.read_bytes())
+
+
+def node(entry, name):
+    if entry[0] == name:
+        return entry
+    return next((found for child in entry[2] if (found := node(child, name))), None)
+
+
+# The kernel's timer runs at the device tree's timebase: TCG's counter is 62.5 MHz, under HVF it is the host's.
+timebase = struct.unpack('<I', dict(node(tree, 'cpu0')[1])['timebase-frequency'])[0]
+expected = 62500000 if args.accel == 'tcg' else int(subprocess.check_output(['sysctl', '-n', 'hw.tbfrequency'], text=True))
+if timebase != expected:
+    raise SystemExit(f'the payload\'s device tree has a {timebase} Hz timebase, {args.accel} needs {expected} Hz: rebuild '
+                     f'the payload with UNIXNU_QEMU_ACCEL={args.accel}')
+
 fixture = ROOT / 'build/native-user-fixture'
 if args.native_user:
     # The test process is the whole md0 image (a single Mach-O, which mockfs serves as /sbin/launchd); its own trust
@@ -76,11 +99,6 @@ if args.native_user:
         raise SystemExit('the payload already has an initrd; build it without --data-ramdisk for --native-user')
     (esp / 'EFI/UniXNU/unixnu.toml').write_text(
         config.replace('args = "', 'initrd = "Payloads/launchd.macho"\nargs = "rd=md0 ', 1))
-    spec = importlib.util.spec_from_file_location('make_qemu_adt', ROOT / 'scripts/make-qemu-adt.py')
-    adt_tool = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(adt_tool)
-    adt = payloads / 'kernel.macho.adt'
-    tree, _ = adt_tool.parse(adt.read_bytes())
     chosen = adt_tool.child(tree, 'chosen')
     chosen[1] = [item for item in chosen[1] if item[0] != 'root-matching']   # a memory root, not a matched volume
     memory_map = adt_tool.child(chosen, 'memory-map')
@@ -93,7 +111,8 @@ variables = work / 'vars.fd'
 with variables.open('wb') as f:
     f.truncate(code.stat().st_size)
 sock = work / 'qmp.sock'
-command = [qemu, '-M', 'virt,virtualization=off,secure=off,gic-version=3', '-accel', 'tcg', '-cpu', 'cortex-a710',
+command = [qemu, '-M', 'virt,virtualization=off,secure=off,gic-version=3', '-accel', args.accel,
+           '-cpu', 'cortex-a710' if args.accel == 'tcg' else 'host',
            '-m', str(MEMORY_MIB), '-smp', '1',
            '-drive', f'if=pflash,format=raw,readonly=on,file={code}', '-drive', f'if=pflash,format=raw,file={variables}',
            '-drive', f'if=none,id=esp,format=raw,readonly=on,file=fat:{esp}', '-device', 'virtio-blk-pci,drive=esp',
