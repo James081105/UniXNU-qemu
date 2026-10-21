@@ -19,13 +19,15 @@ What QEMU does not cover: the stock bootloader, the board firmware, UFS, touch, 
 | --- | --- |
 | `board.toml` | Board, IPSW, kernel, payload and ADT settings |
 | `configs/qemu_defconfig` | Kernel configuration up to the root mount, and the mockfs test root |
-| `configs/qemu_root_defconfig` | `qemu_defconfig` plus the verified VirtIO block driver and the owner root chain: the original OS volume as the root |
+| `configs/qemu_root_defconfig` | `qemu_defconfig` plus the verified VirtIO block driver, the owner root chain, the SystemOS union mount and the Data mount: the original iPadOS userland |
 | `feeds.toml` | IOStorageFamily, which UniXNU's feeds do not list ([UniXNU#7](https://github.com/UniXNU/UniXNU/issues/7)) |
-| `scripts/make-qemu-adt.py` | Device tree: `make-dt.py` (GICv3, NVRAM proxy, memory window, SHA2-384, platform-only AMFI, root matching, the VirtIO MMIO windows of QEMU's own device tree) plus the platform seed and the iPad7,1 identity of the board trees; the UFS test nodes of `make-dt.py` are removed |
+| `scripts/make-qemu-adt.py` | Device tree: `make-dt.py` (GICv3, NVRAM proxy, memory window, SHA2-384, platform-only AMFI, root matching, the VirtIO MMIO windows of QEMU's own device tree, `vmm-present`) plus the platform seed and the iPad7,1 identity of the board trees; the UFS test nodes of `make-dt.py` are removed |
 | `scripts/build-darwinboot-efi.py` | DarwinBoot as a standalone driver image |
-| `scripts/run-qemu.py` | Stage the ESP, boot, keep the serial log and take screenshots; `--native-user` boots UniXNU's static test process from mockfs, `--os-root` attaches the OS disk image |
+| `scripts/run-qemu.py` | Stage the ESP, boot, keep the serial log and take screenshots; `--native-user` boots UniXNU's static test process from mockfs, `--os-root` attaches the OS and SystemOS images |
+| `scripts/qemu-ps.py` | The guest's processes (PID, state, name) of a running `run-qemu.py`, read from the kernel's `allproc` through the QEMU monitor |
 | `scripts/build-storage-abi.py` | The original block storage ABI (`build/storage-abi/interface-audit.json`): makes the inputs of UniXNU's `audit-storage-interface.py` from this board's kernel and runs it |
-| `scripts/build-os-root.py` | Everything `qemu_root_defconfig` and its payload need besides the kernel step: the storage ABI, the OS disk image, the owner key, the OS policy, the policy archive, the verified VirtIO driver and the original trust cache bundle |
+| `scripts/build-owner-systemos-policy.py` | The owner-signed SystemOS policy, which no UniXNU script makes ([UniXNU#7](https://github.com/UniXNU/UniXNU/issues/7)) |
+| `scripts/build-os-root.py` | Everything `qemu_root_defconfig` and its payload need besides the kernel step: the storage ABI, the OS and SystemOS images, the owner key, both policies, the policy archive, the verified VirtIO and RAM block drivers, the Data seed and the original trust cache bundle |
 | `scripts/build-platform-power.py`, `package/ShengPlatformPower.cpp` | The original-PMGR bridge of UniXNU-sheng (no hardware access) |
 | `scripts/build-link-stubs.py`, `package/LinkStubs.c` | No-op hooks for probes of left-out components |
 | `scripts/build-arm-driver.py`, `scripts/patch-xnu-entry-probe.py`, `scripts/xnu-panic-screen.c` | Copied unchanged from UniXNU-sheng |
@@ -67,39 +69,45 @@ native user: PC 00000001000003d4 (checkpoint 1000003d4), EL0, getpid 1, sysctl s
 
 The screen keeps the three entry probe bars over the UniXNU menu: the kernel draws nothing unless it panics.
 
-### OS volume as the root
+### iPadOS userland
 
 After the build above (`qemu_defconfig`):
 
 ```sh
 cd out/qemu/tree && python3 scripts/build-os-root.py && cd ../../..
+export XNU_OWNER_DATA_VOLUME_UUID=$(python3 -c "import json; print(json.load(open('../UniXNU-qemu/.cache/firmware/owner-data/seed.json'))['volume_uuid'])")
 ./unixnu defconfig qemu_root_defconfig -D ../UniXNU-qemu
 ./unixnu build kernel -D ../UniXNU-qemu
 ./unixnu build payload -D ../UniXNU-qemu --unique-chip-id "$(cat ../UniXNU-qemu/.cache/platform-seed)" \
-  --trust-cache out/qemu/tree/build/original-static-system-trust/original-static-system.bundle
+  --trust-cache out/qemu/tree/build/original-static-system-trust/original-static-system.bundle \
+  --data-ramdisk ../UniXNU-qemu/.cache/firmware/owner-data/owner-data-32.dbr
 
-python3 out/qemu/tree/scripts/run-qemu.py --os-root --display cocoa
+python3 out/qemu/tree/scripts/run-qemu.py --os-root --display cocoa --seconds 1800
+python3 out/qemu/tree/scripts/qemu-ps.py          # in a second shell, while it runs
 ```
 
-`build-os-root.py` skips each step whose output exists. The first run boots the `qemu_defconfig` kernel in QEMU once (for the storage ABI), signs and checks the 1,483,785 blocks of the OS disk image, and attaches that image read-only for the time of the policy step. The owner private key stays in `out/qemu/tree/build/verified-root-host/keys`; a new key needs a new policy, kernel and payload.
+`build-os-root.py` skips each step whose output exists. The first run boots the `qemu_defconfig` kernel in QEMU once (for the storage ABI), signs and checks the 1,483,785 blocks of the OS disk image and the 806,400 blocks of the SystemOS image, and attaches the OS image read-only for the time of the OS policy and the Data seed. The owner private key stays in `out/qemu/tree/build/verified-root-host/keys`; a new key needs new policies, a new kernel and payload. The Data seed and its volume UUID stay in `.cache/firmware/owner-data` of this repository; `qemu_root_defconfig` takes the UUID from the environment because every seed has its own.
 
-`--os-root` attaches the OS disk image read-only (without mounting it) and gives QEMU the raw device as a VirtIO block device. The kernel reads every block through the owner-signed policy, mounts the OS volume by its UUID, accepts the root that APFS cannot authenticate without Apple's boot manifest, and starts the original `/sbin/launchd`. It ends with:
+`--os-root` attaches the OS disk image read-only (without mounting it) and gives QEMU the raw device and the SystemOS image file as two VirtIO block devices. The kernel picks each disk's policy by its size and checks every block it reads, mounts the OS volume by its UUID and accepts it as the root, mounts SystemOS read-only as a union over `/`, mounts the Data ramdisk at `/private/var` and starts the original `/sbin/launchd`. The screen keeps the entry probe bars; `qemu-ps.py` shows the userland: after 5 minutes about 120 processes (logd, configd, securityd, lockdownd, usermanagerd, backboardd and the rest of the system daemons) and no panic for at least 11 minutes. SpringBoard does not start: there is no display for backboardd.
 
-```
-initproc failed to start -- exit reason namespace 6 subcode 0x1 description: Library not loaded: /usr/lib/libSystem.B.dylib
-  Referenced from: <4B525992-8C69-315E-A51A-CC9433E45B51> /sbin/launchd
-  Reason: tried: '/usr/lib/libSystem.B.dylib' (no such file, no dyld cache)
-```
+Each missing piece stops the boot with its own panic:
 
-The dyld shared cache is on the SystemOS cryptex, which needs a second policy that no UniXNU script makes yet ([UniXNU#7](https://github.com/UniXNU/UniXNU/issues/7)). Without `--trust-cache` the kernel stops one step earlier: AMFI refuses launchd (`unexpected SIGKILL of launchd`, namespace 9 code 0x8).
+| Missing | Panic |
+| --- | --- |
+| `--trust-cache` | `unexpected SIGKILL of launchd`, namespace 9 (EXEC) code 0x8 (SECURITY_POLICY): AMFI refuses launchd |
+| SystemOS | `initproc failed to start`, namespace 6 (DYLD): `Library not loaded: /usr/lib/libSystem.B.dylib ... no dyld cache` |
+| Data | `tzinit[17] exited ... exit status 30` (EROFS) |
+| `vmm-present` | `watchdogd exited`, namespace 2 (SIGNAL) subcode 5 (SIGTRAP): without a VM, the original watchdogd traps when no watchdog service exists ([`check-watchdogd-branches.py`](../UniXNU/scripts/check-watchdogd-branches.py) of UniXNU) |
 
-Three gaps of a clean tree that `build-os-root.py` and this repository fill:
+Gaps of a clean tree that this repository fills:
 
 - `audit-storage-interface.py` reads a candidate kernel, a live observation and the AES audit's metaclass layout, which no UniXNU script produces; `build-storage-abi.py` makes them (see its header).
+- No UniXNU script makes the SystemOS policy that `build-verified-root-probe.py --include-systemos` reads; `build-owner-systemos-policy.py` does.
 - `build-verified-root-probe.py` compiles with the bsd compile record and `-Werror`; the record names `build/xnu/ios-obj/EXPORT_HDRS/libsa`, which the kernel build does not create (it creates the one under `build/xnu/obj`).
 - `build-original-system-trust.py` reads `.cache/firmware/target-volumes/static-trustcache.bin`, the payload of the StaticTrustCache IM4P, and the IPSW from `refer/`; neither is produced or linked.
+- The verified NativeVirtioBlock and NativeRamBlock reference NativeUfs hooks (`native_ufs_block_authenticates`, the `native_ufs_store_*` Data store). They are declared weak, but a static kernel link still needs them: `package/LinkStubs.c` defines them as "not a UFS window" and "no store".
 
-The verified NativeVirtioBlock declares the NativeUfs hook `native_ufs_block_authenticates` weak, but a static kernel link still needs it: `package/LinkStubs.c` defines it as "not a UFS window".
+sheng disables watchdogd with `sheng-disable-watchdogd=1` instead: its boot progress archive writes launchd's `disabled.plist` from the kernel. A copy written into the Data seed on this Mac does not work: launchd only takes the file from uid 0, and the seed's files belong to the user who made it.
 
 ## State
 
@@ -113,7 +121,10 @@ The verified NativeVirtioBlock declares the NativeUfs hook `native_ufs_block_aut
 | mockfs root on `md0`, first user process (`--native-user`) | works: the test process runs at EL0 as PID 1 and reads a 4 KiB `hw.pagesize` |
 | Verified VirtIO block, OS volume as the root (`qemu_root_defconfig`, `--os-root`) | works: the owner-signed root is mounted and accepted |
 | AMFI, original `/sbin/launchd` from the OS volume | starts with the original trust cache bundle |
-| dyld | stops: no dyld shared cache without SystemOS |
+| SystemOS union mount, dyld shared cache | works |
+| Data ramdisk at `/private/var` (NativeRamBlock) | works |
+| System daemons | about 120 processes, no panic for at least 11 minutes |
+| backboardd, SpringBoard | backboardd runs; SpringBoard does not start without a display |
 
 ## License
 
