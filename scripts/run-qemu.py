@@ -112,11 +112,19 @@ if args.os_root:
         attached = [plistlib.loads(subprocess.check_output(['hdiutil', 'attach', '-nomount', '-readonly', '-noverify',
                                                             '-noautofsck', '-plist', image]))]
     disk = next(e['dev-entry'] for e in attached[0]['system-entities'] if e.get('content-hint') == 'GUID_partition_scheme')
+    # The SystemOS member is a plain APFS container; its policy (build-owner-systemos-policy.py) covers the file.
+    systemos = ROOT / '.cache/firmware/target-volumes/044-76034-038.dmg'
+    if not systemos.is_file():
+        raise SystemExit(f'{systemos} missing (scripts/build-os-root.py)')
     command += ['-global', 'virtio-mmio.force-legacy=false', '-blockdev', json.dumps({
                     'driver': 'raw', 'node-name': 'os', 'read-only': True,
                     'file': {'driver': 'host_device', 'filename': '/dev/r' + Path(disk).name, 'read-only': True,
                              'locking': 'off'}}),
-                '-device', 'virtio-blk-device,drive=os']
+                '-device', 'virtio-blk-device,drive=os',
+                '-blockdev', json.dumps({'driver': 'raw', 'node-name': 'systemos', 'read-only': True,
+                                         'file': {'driver': 'file', 'filename': str(systemos), 'read-only': True,
+                                                  'locking': 'off'}}),
+                '-device', 'virtio-blk-device,drive=systemos']
 (out / 'command.txt').write_text(' '.join(str(part) for part in command) + '\n')
 process = subprocess.Popen([str(part) for part in command], stdout=open(out / 'qemu.log', 'w'), stderr=subprocess.STDOUT)
 
