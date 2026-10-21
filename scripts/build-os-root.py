@@ -16,7 +16,9 @@ Run in the build tree after "unixnu build package kernel payload" with qemu_defc
 7. NativeVirtioBlock in verified mode, picking the policy by disk size, and NativeRamBlock, each with its
    original-class bindings.
 8. The Data seed packed for DarwinBoot (DBRDISK1).
-9. build-original-system-trust.py: the original static and System trust caches as one bundle, the payload's
+9. The display: build-display-abi.py (the original IOMobileFramebufferLegacy observed in QEMU once) and
+   build-native-legacy-display.py (NativeLegacyDisplay, LegacyDisplayProbe and NativeGOPPresenter).
+10. build-original-system-trust.py: the original static and System trust caches as one bundle, the payload's
    --trust-cache. Without it AMFI refuses to run launchd (exit reason namespace 9, EXEC, code 8, SECURITY_POLICY).
    Its static module is the payload of the StaticTrustCache IM4P that "unixnu ipsw fetch" extracts.
 
@@ -89,6 +91,10 @@ if not (ROOT / 'build/native-ram-block/libNativeRamBlock.a').is_file():
 seed = data / 'owner-data-32.dbr'
 if not seed.is_file():
     step(ROOT / 'drivers/DarwinBoot/Test/packed_ramdisk.py', data / 'owner-data-32.cdr', seed)
+if not (ROOT / 'build/native-legacy-display/libNativeLegacyDisplay.late.a').is_file():
+    if not (ROOT / 'build/darwinboot-owner-hvf-mobile-graphics-legacy-class/gdb-stop.json').is_file():
+        step(ROOT / 'scripts/build-display-abi.py')
+    step(ROOT / 'scripts/build-native-legacy-display.py')
 trust = ROOT / 'build/original-static-system-trust/original-static-system.bundle'
 if not trust.is_file():
     static = volumes / 'static-trustcache.bin'

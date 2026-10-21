@@ -98,6 +98,11 @@ trust_cache_sha256 = [
 ]
 # The arguments of UniXNU-pipa. sheng-pmgr=2 publishes the original PMGR nub through the bridge;
 # -apfs_shared_datavolume, as on sheng, lets the user-management stack use the one Data volume of qemu_root_defconfig.
+# The offline-* arguments start qemu_root_defconfig's display, with the values of sheng's board.toml: load
+# IOMobileGraphicsFamily, create the display (offline-legacy-register), publish it under /arm-io as the system display
+# (phase 4) on the UEFI frame buffer (gop), at one frame-buffer pixel per point (unit-scale=1), with firmware-powered
+# power management, swap validation, the CPU copy to the frame buffer and retirement of each copied frame. Under
+# qemu_defconfig there is no display, and offline-legacy-register reaches the no-op of package/LinkStubs.c.
 kernel_args = [
   "-apfs_shared_datavolume",
   "-v",
@@ -108,6 +113,15 @@ kernel_args = [
   "sheng-pmgr=2",
   "-no_slto_panic",
   "ml-timeout-lock-panic-scale=40",
+  "offline-mobile-graphics-load=1",
+  "offline-legacy-register=1",
+  "offline-legacy-phase=4",
+  "offline-legacy-gop=1",
+  "offline-legacy-unit-scale=1",
+  "offline-legacy-pm=1",
+  "offline-legacy-validate=1",
+  "offline-legacy-transfer=1",
+  "offline-legacy-cpu-present=1",
 ]
 
 [payload.adt]

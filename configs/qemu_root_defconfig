@@ -6,7 +6,9 @@
 # read-only as a union over / (OWNER_CACHE_MOUNT, OWNER_UNION_SYSTEMOS), publishes the boot manifest hash of the two
 # policies (OWNER_BOOT_MANIFEST) and tells dyld to use the shared cache from there (OWNER_CACHE_STARTUP), as on sheng.
 # It then mounts the writable Data seed, delivered as the payload's Data ramdisk and published by NativeRamBlock, at
-# /private/var (OWNER_DATA_MOUNT).
+# /private/var (OWNER_DATA_MOUNT). NATIVE_LEGACY_DISPLAY publishes the UEFI frame buffer (ramfb) as the system display
+# through the original IOMobileFramebufferLegacy and copies each frame into it (the offline-legacy-* arguments of
+# board.toml).
 #
 # The archives are made outside the kernel step, from a kernel built with qemu_defconfig (scripts/build-os-root.py).
 # The Data volume UUID differs per seed, so it is not set here: export XNU_OWNER_DATA_VOLUME_UUID from the seed's
@@ -34,6 +36,7 @@ CONFIG_XNU_OWNER_BOOT_MANIFEST=y
 CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
 CONFIG_XNU_NATIVE_RAM_BLOCK=y
 CONFIG_XNU_OWNER_DATA_MOUNT=y
+CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y
 
 CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
 CONFIG_XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE="{tree}/build/native-virtio-block-verified-bundle/libNativeVirtioBlock.a"
