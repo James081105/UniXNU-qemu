@@ -117,7 +117,8 @@ command = [qemu, '-M', 'virt,virtualization=off,secure=off,gic-version=3', '-acc
            '-drive', f'if=pflash,format=raw,readonly=on,file={code}', '-drive', f'if=pflash,format=raw,file={variables}',
            '-drive', f'if=none,id=esp,format=raw,readonly=on,file=fat:{esp}', '-device', 'virtio-blk-pci,drive=esp',
            '-device', 'ramfb', '-device', 'qemu-xhci', '-device', 'usb-kbd', '-nic', 'none',
-           '-display', args.display, '-no-reboot',
+           # A cocoa window scales the 800x600 frame buffer to its size (drag its corner, or View > Zoom To Fit).
+           '-display', args.display + (',zoom-to-fit=on' if args.display == 'cocoa' else ''), '-no-reboot',
            '-serial', f'file:{out / "serial.log"}', '-qmp', f'unix:{sock},server=on,wait=off']
 if args.os_root:
     # The whole disk image as the host sees it, read through its read-only attachment; the policy that
@@ -143,7 +144,10 @@ if args.os_root:
                 '-blockdev', json.dumps({'driver': 'raw', 'node-name': 'systemos', 'read-only': True,
                                          'file': {'driver': 'file', 'filename': str(systemos), 'read-only': True,
                                                   'locking': 'off'}}),
-                '-device', 'virtio-blk-device,drive=systemos']
+                '-device', 'virtio-blk-device,drive=systemos',
+                # The pointer and keyboard of the QEMU window for package/VirtioInput.cpp: a click and drag is a touch,
+                # Home or F1 is the Home button. QEMU sends its input to them once the driver has started them.
+                '-device', 'virtio-tablet-device', '-device', 'virtio-keyboard-device']
 (out / 'command.txt').write_text(' '.join(str(part) for part in command) + '\n')
 process = subprocess.Popen([str(part) for part in command], stdout=open(out / 'qemu.log', 'w'), stderr=subprocess.STDOUT)
 
