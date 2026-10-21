@@ -1,25 +1,31 @@
 #!/usr/bin/env python3
 """List the processes of the kernel that a run-qemu.py run is executing, through its QEMU monitor.
 
-  qemu-ps.py [RUN_DIR]
+  qemu-ps.py [--run RUN_DIR] [--value SYMBOL[:BYTES] ...]
 
 Walks the kernel's allproc list with QEMU's "x" command (virtual addresses through the current translation; the kernel
-half is mapped in every context) and prints PID, state and name. RUN_DIR defaults to the newest out/qemu/run/<time>;
-the run must still be going. The struct proc offsets are the defaults of UniXNU's scripts/qemu-entry/gdb-stop.py.
+half is mapped in every context) and prints PID, state and name. --value prints kernel globals instead, as unsigned
+little-endian numbers of BYTES bytes (default 4), for example the display's native_legacy_stage. RUN_DIR defaults to
+the newest out/qemu/run/<time>; the run must still be going. The struct proc offsets are the defaults of UniXNU's
+scripts/qemu-entry/gdb-stop.py.
 """
+import argparse
 import json
 from pathlib import Path
 import re
 import socket
 import subprocess
-import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT.parent
 LIST, PID, STAT, COMM = 0, 96, 100, 1468          # p_list.le_next, p_pid, p_stat, p_comm
 STATES = {1: 'idle', 2: 'run', 3: 'stop', 4: 'zombie', 5: 'reaped'}
 
-run = Path(sys.argv[1]) if len(sys.argv) > 1 else max((WORK / 'run').iterdir())
+parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+parser.add_argument('--run', type=Path, help='run directory (default: the newest)')
+parser.add_argument('--value', action='append', default=[], metavar='SYMBOL[:BYTES]', help='print a kernel global')
+args = parser.parse_args()
+run = args.run or max((WORK / 'run').iterdir())
 match = re.search(r'-qmp unix:([^,]+),', (run / 'command.txt').read_text())
 if not match:
     raise SystemExit(f'no QMP socket in {run}/command.txt')
@@ -53,8 +59,22 @@ def read(address, count):
 
 
 symbols = subprocess.check_output(['xcrun', 'nm', WORK / 'kernel/kernel.macho'], text=True)
-allproc = int(re.search(r'^([0-9a-f]{16}) \w _allproc$', symbols, re.M)[1], 16)
-proc = int.from_bytes(read(allproc, 8), 'little')
+
+
+def symbol(name):
+    found = re.search(rf'^([0-9a-f]{{16}}) \w _{re.escape(name)}$', symbols, re.M)
+    if not found:
+        raise SystemExit(f'{name} is not a kernel symbol')
+    return int(found[1], 16)
+
+
+if args.value:
+    for request in args.value:
+        name, _, size = request.partition(':')
+        value = int.from_bytes(read(symbol(name), int(size or 4)), 'little')
+        print(f'{name} = {value} ({value:#x})')
+    raise SystemExit(0)
+proc = int.from_bytes(read(symbol('allproc'), 8), 'little')
 rows = []
 while proc and len(rows) < 1024:
     pid = int.from_bytes(read(proc + PID, 4), 'little', signed=True)
