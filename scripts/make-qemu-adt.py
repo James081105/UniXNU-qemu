@@ -77,7 +77,9 @@ def main():
         parser.error('--unique-chip-id and --chip-id must be supplied together')
     cpus = len(args.cpu_regs.split(','))
 
-    command = ['python3', ROOT / 'scripts/qemu-entry/make-dt.py', '--armvirt', '--armcpu', '--nvram-proxy',
+    # --qemu-vmm-present: /defaults/vmm-present, which XNU reports as kern.hv_vmm_present. The original watchdogd
+    # exits normally in a VM without a watchdog service, and stops with SIGTRAP otherwise (check-watchdogd-branches.py).
+    command = ['python3', ROOT / 'scripts/qemu-entry/make-dt.py', '--armvirt', '--armcpu', '--nvram-proxy', '--qemu-vmm-present',
                '--crypto-hash-method', 'sha2-384', '--amfi-platform-only', '--osenvironment', 'main',
                '--qemu-accel', QEMU_ACCEL, '--dram-size', str(args.dram_size)]
     if args.owned_memory_size is not None:
