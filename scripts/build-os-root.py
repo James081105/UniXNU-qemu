@@ -15,7 +15,10 @@ Run in the build tree after "unixnu build package kernel payload" with qemu_defc
 6. build-verified-root-probe.py --component os --include-systemos: both policies and the verifier as a kernel archive.
 7. NativeVirtioBlock in verified mode, picking the policy by disk size, and NativeRamBlock, each with its
    original-class bindings.
-8. The Data seed packed for DarwinBoot (DBRDISK1).
+8. The Data seed grown to 1 GiB and packed for DarwinBoot (DBRDISK1). 32 MiB fills up within two minutes of the
+   userland (backboardd then crashes with ENOSPC). NativeRamBlock keeps a seed of up to 2 GiB in memory and allocates
+   a page on its first write; a larger one waits for sheng's UFS store before it accepts writes. UniXNU's
+   seed-data-grow.py makes 3 GiB and more only, so the container is grown here the same way.
 9. The display: build-display-abi.py (the original IOMobileFramebufferLegacy observed in QEMU once) and
    build-native-legacy-display.py (NativeLegacyDisplay, LegacyDisplayProbe and NativeGOPPresenter).
 10. build-original-system-trust.py: the original static and System trust caches as one bundle, the payload's
@@ -88,9 +91,31 @@ if not (ROOT / 'build/native-ram-block/libNativeRamBlock.a').is_file():
     step(ROOT / 'scripts/build-arm-driver.py', 'NativeRamBlock')
     step(ROOT / 'scripts/build-native-virtio-bindings.py', '--component', 'NativeRamBlock',
          '--directory', ROOT / 'build/native-ram-block')
-seed = data / 'owner-data-32.dbr'
+seed = data / 'owner-data-1g.dbr'
 if not seed.is_file():
-    step(ROOT / 'drivers/DarwinBoot/Test/packed_ramdisk.py', data / 'owner-data-32.cdr', seed)
+    raw = data / 'owner-data-1g.raw'
+    with raw.open('wb') as handle:                     # sparse: only the 32 MiB seed is written
+        handle.truncate(1 << 30)
+        handle.seek(0)
+        handle.write((data / 'owner-data-32.cdr').read_bytes())
+    try:
+        attached = plistlib.loads(subprocess.check_output(['hdiutil', 'attach', '-imagekey', 'diskimage-class=CRawDiskImage',
+                                                           '-nomount', '-nobrowse', '-plist', raw]))
+        store = Path(attached['system-entities'][0]['dev-entry']).name
+        try:
+            listing = plistlib.loads(subprocess.check_output(['diskutil', 'apfs', 'list', '-plist']))
+            container = next(entry['ContainerReference'] for entry in listing['Containers']
+                             if any(s['DeviceIdentifier'] == store for s in entry.get('PhysicalStores', [])))
+            subprocess.run(['diskutil', 'apfs', 'resizeContainer', container, '0'], check=True)
+        finally:
+            subprocess.run(['hdiutil', 'detach', store, '-force'], check=True)
+        header = raw.open('rb').read(4096)
+        blocks = int.from_bytes(header[40:48], 'little')
+        if header[32:36] != b'NXSB' or not (1 << 30) - (64 << 20) <= blocks * 4096 <= 1 << 30:
+            raise SystemExit('The grown Data seed is not a 1 GiB APFS container')
+        step(ROOT / 'drivers/DarwinBoot/Test/packed_ramdisk.py', raw, seed)
+    finally:
+        raw.unlink()
 if not (ROOT / 'build/native-legacy-display/libNativeLegacyDisplay.late.a').is_file():
     if not (ROOT / 'build/darwinboot-owner-hvf-mobile-graphics-legacy-class/gdb-stop.json').is_file():
         step(ROOT / 'scripts/build-display-abi.py')
