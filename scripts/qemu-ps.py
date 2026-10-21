@@ -35,25 +35,34 @@ if not match:
 sock = match[1]
 
 
+monitor = None
+
+
 def qmp(name, **arguments):
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+    # One connection for the whole run: QEMU takes one QMP client at a time and is slow to take the next one, so a
+    # connection per read would often be refused. run-qemu.py's screenshots wait while this one is open.
+    global monitor
+    if monitor is None:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(60)
-        for attempt in range(50):          # QEMU takes one QMP client at a time; run-qemu.py's screenshots use it too
+        for attempt in range(100):
             try:
                 s.connect(sock)
                 break
             except ConnectionRefusedError:
-                if attempt == 49:
+                if attempt == 99:
                     raise
                 time.sleep(0.2)
-        stream = s.makefile('rwb', buffering=0)
-        stream.readline()
-        for request in ({'execute': 'qmp_capabilities'}, {'execute': name, 'arguments': arguments}):
-            stream.write((json.dumps(request) + '\n').encode())
-            while True:
-                reply = json.loads(stream.readline())
-                if 'return' in reply or 'error' in reply:
-                    break
+        monitor = s.makefile('rwb', buffering=0)
+        monitor.readline()
+        monitor.write(b'{"execute": "qmp_capabilities"}\n')
+        while 'return' not in json.loads(monitor.readline()):
+            pass
+    monitor.write((json.dumps({'execute': name, 'arguments': arguments}) + '\n').encode())
+    while True:
+        reply = json.loads(monitor.readline())
+        if 'return' in reply or 'error' in reply:
+            break
     if 'error' in reply:
         raise SystemExit(f'{name} {arguments}: {reply["error"]}')
     return reply['return']
