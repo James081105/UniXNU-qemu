@@ -23,8 +23,10 @@ What QEMU does not cover: the stock bootloader, the board firmware, UFS, touch, 
 | `feeds.toml` | IOStorageFamily ([UniXNU#7](https://github.com/UniXNU/UniXNU/issues/7)) and dyld 1165.3 (for `audit-target-display-query.py`), which UniXNU's feeds do not list |
 | `scripts/make-qemu-adt.py` | Device tree: `make-dt.py` (GICv3, NVRAM proxy, memory window, SHA2-384, platform-only AMFI, root matching, the VirtIO MMIO windows of QEMU's own device tree, `vmm-present`) plus the platform seed and the iPad7,1 identity of the board trees; the UFS test nodes of `make-dt.py` are removed |
 | `scripts/build-darwinboot-efi.py` | DarwinBoot as a standalone driver image |
-| `scripts/run-qemu.py` | Stage the ESP, boot, keep the serial log and take screenshots; `--native-user` boots UniXNU's static test process from mockfs, `--os-root` attaches the OS and SystemOS images and adds the VirtIO tablet and keyboard, `--accel hvf` runs on this Mac's CPU, `--screen` sets the screen size (default 1376x1024), `--shared-window MIB` adds memory shared with this Mac; a cocoa window scales the screen to its size |
+| `scripts/run-qemu.py` | Stage the ESP, boot, keep the serial log and take screenshots; `--native-user` boots UniXNU's static test process from mockfs, `--os-root` attaches the OS and SystemOS images and adds the VirtIO tablet and keyboard, `--accel hvf` runs on this Mac's CPU, `--screen` sets the screen size (default 1376x1024), `--shared-window MIB` adds memory shared with this Mac, `--metal` gives the guest the Mac's GPU (`--metal-clients`, `--metal-verbose`); a cocoa window scales the screen to its size |
 | `package/SharedWindow.cpp`, `scripts/guest-ram.py` | The memory window of `--shared-window`: guest physical memory after the 6 GiB, which QEMU maps from `RUN_DIR/shared.bin` and the kernel does not manage. The kernel finds it through the fw_cfg item `opt/org.unixnu/shared-window`, maps it write-back cacheable and answers a mailbox at its start every 1 ms; `guest-ram.py` checks both directions and times the round trip. The first step of a Metal device whose work runs on this Mac |
+| `package/QemuMetal`, `scripts/build-qemu-metal.py` | A Metal device whose work runs on this Mac's GPU (see [Metal](#metal)): `QemuMetalRemote.cpp` implements NativeMetal's bridge ABI over the window under UniXNU's frontend, `QemuMetalHost.mm` (`qemu-metal-host`) executes it with this Mac's Metal, `QemuMetalAccelerator.cpp` and `QemuMetalPublish.cpp` publish the accelerator and the per-process grants in the kernel, `QemuMetalPlugin.mm` is the plugin bundle the original discovery loads, `QemuMetalLibraries.mm` and `QemuMetalGaps.mm` add what the frontend lacks, `QemuMetalCheck.mm` compares this Mac's CARenderer on the device with the Mac's own |
+| `scripts/qemu-input.py` | Taps, swipes, Home and screenshots in a running `run-qemu.py` guest through its QMP socket (the VirtIO tablet and keyboard) |
 | `package/QemuRamfbPkg`, `scripts/build-qemu-ramfb-efi.py` | A UEFI driver that `run-qemu.py` loads before DarwinBoot: it switches ramfb to the size of the fw_cfg item `opt/org.unixnu/ramfb-size` and makes it the only mode of every GOP instance, so UniXNU, DarwinBoot and the kernel use it. The firmware's ramfb driver offers 640x480, 800x600 and 1024x768 only |
 | `scripts/qemu-ps.py` | The guest's processes (PID, state, name) of a running `run-qemu.py`, read from the kernel's `allproc` through the QEMU monitor; `--value` reads kernel globals such as the display's counters, `--log` saves the kernel log |
 | `scripts/qemu_esp.py` | The ESP of a QEMU observation with UniXNU's `gdb-stop.py`: the payload with the kernel step's kernel and extra arguments |
@@ -43,12 +45,12 @@ What QEMU does not cover: the stock bootloader, the board firmware, UFS, touch, 
 
 ## Build and run
 
-Needs QEMU (`brew install qemu`) besides the [host tools](https://unixnu.com/guide/requirements). Until [UniXNU#5](https://github.com/UniXNU/UniXNU/pull/5) is merged, a first kernel build needs its branch `fix/kernel-bootstrap`.
+Needs QEMU (`brew install qemu`) besides the [host tools](https://unixnu.com/guide/requirements). Clone [UniXNU](https://github.com/UniXNU/UniXNU) (with `--recurse-submodules`) and this repository side by side, and work in UniXNU:
 
 ```sh
-cd ~/agents-home/UniXNU
-export UNIXNU_IPSW=~/agents-home/UniXNU/out/ipsw/iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw
-export UNIXNU_UEFI=~/agents-home/uefi-pipa        # only for the panic screen font of the payload step
+cd UniXNU
+export UNIXNU_IPSW=$PWD/out/ipsw/iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw   # a local copy of [ipsw] url, or leave it unset
+export UNIXNU_UEFI=<a UEFI tree with the panic screen font>                 # only for the panic screen font of the payload step
 
 ./unixnu defconfig qemu_defconfig -D ../UniXNU-qemu
 ./unixnu ipsw fetch -D ../UniXNU-qemu
@@ -145,6 +147,21 @@ Gaps of a clean tree that this repository fills:
 - The display archive's builder exists only in UniXNU-sheng and compiles sheng's board probes; `audit-mobile-graphics-legacy.py` reads a candidate kernel and an observation of the original class that no script produces, and writes to `build/display-analysis` without creating it. `build-native-legacy-display.py` and `build-display-abi.py` of this repository cover them.
 - `audit-target-display-query.py`, which makes the process layout of the user-space observations, checks `refer/dyld`, which `unixnu` neither fetches nor links; this repository's `feeds.toml` fetches it and `qemu_esp.py` links it.
 
+### Metal
+
+The guest can render on this Mac's GPU. The render server's plugin (and that of each process `--metal-clients` names, by default the icon service) gets a Metal device whose objects live on this Mac: `qemu-metal-host` executes their work with the Mac's Metal, and both sides share a memory window (`--shared-window`, 2 GiB by default), one slot per process, so buffers are never copied and IOSurfaces only once each way. iPadOS's own shader libraries are compiled from their AIR slices on this Mac.
+
+```sh
+cd out/qemu/tree && python3 scripts/build-qemu-metal.py check && python3 scripts/build-qemu-metal.py guest && cd ../../..
+UNIXNU_QEMU_ACCEL=hvf ./unixnu build payload -D ../UniXNU-qemu --unique-chip-id "$(cat ../UniXNU-qemu/.cache/platform-seed)" \
+  --owner-trust-cache out/qemu/tree/build/qemu-metal/owner-trust.bundle \
+  --data-ramdisk out/qemu/tree/build/qemu-metal/owner-data-1g-metal.dbr --skip-setup --kernel-arg sheng-gpu-addon=1
+
+python3 out/qemu/tree/scripts/run-qemu.py --os-root --accel hvf --display cocoa --metal --seconds 3600
+```
+
+`build-qemu-metal.py check` first compares this Mac's CARenderer on the device with the Mac's own device; `guest` builds the 4 KiB-signed plugin bundle, an owner trust cache with its CDHash and a Data seed that carries it (the kernel's addon mount, `sheng-gpu-addon=1`, presents it in `/System/Library/Extensions`). `RUN_DIR/metal-host.log` has the host's log and the guest's (the plugin's own lines, every selector the frontend lacks, refusals); `--metal-verbose` adds every request and command of the other processes.
+
 sheng disables watchdogd with `sheng-disable-watchdogd=1` instead: its boot progress archive writes launchd's `disabled.plist` from the kernel. A copy written into the Data seed on this Mac does not work: launchd only takes the file from uid 0, and the seed's files belong to the user who made it.
 
 ## State
@@ -171,10 +188,11 @@ sheng disables watchdogd with `sheng-disable-watchdogd=1` instead: its boot prog
 | Screen size | 1376x1024 (`run-qemu.py --screen`); the window scales it. Widths that are not a multiple of 16 slant the picture (1366: 2-3 bytes per row); switching after the kernel has started is not possible (`PE_state` is read-only after boot) |
 | Vnodes | `kern.maxvnodes` 66560 in the device tree; the BCM2837 configuration's 1024 made the kernel kill apps, backboardd and SpringBoard |
 | Setup | skipped (`unixnu build payload --skip-setup`): lockdownd waits without a timeout on a MIG request (1203) whose server, presumably fairplayd, does not run without FairPlay's kernel extension, and Setup waits on it through profiled |
-| Settings, icons | Settings stays white: iconservicesagent crashes in CoreImage (no Metal, then a NULL EAGL context) and IconServices retries |
+| Settings, icons | without `--metal` Settings stays white: iconservicesagent crashes in CoreImage (no Metal, then a NULL EAGL context) and IconServices retries. With it Settings opens and lists everything, but most row icons lack their symbol: one step of Core Image's symbol rendering (a 20x39 BGRA mask into the 21x40 half-float texture the blur reads) never reaches the GPU |
+| Metal on this Mac's GPU (`--metal`) | backboardd composites the system UI on the Mac's GPU (the Dock's material, the home and lock screens; thousands of draws, no refusal); iconservicesagent draws through Core Image's precompiled kernels in a slot of its own. This Mac's CARenderer on the device matches the Mac's own picture (2 of 65536 pixels differ by at most 9) |
 | Safari | quits at start: SafariShared reads a built-in list from a missing URL; the App cryptex (AppOS) is not mounted |
 | Memory shared with the Mac | `--shared-window 512` under HVF: 20 rounds of 4 MiB each way correct, round trip 0.3-1.4 ms (the kernel polls every 1 ms), the kernel reads and writes 8 MiB in 0.31 ms. Sharing all of the guest's memory instead (a file backing for the 6 GiB) stopped the userland at launchd, spinning, while the Mac wrote the file at about 26 MB/s |
 
 ## License
 
-BSD-2-Clause-Patent. See [LICENSE](LICENSE). The copied and adapted scripts, `ShengPlatformPower.cpp` and `LegacyDisplayProbe.cpp` come from UniXNU-sheng under the same license.
+BSD-2-Clause-Patent. See [LICENSE](LICENSE). The copied and adapted scripts, `KeyStoreProbe.cpp`, `HidInputProbe.cpp` and `LegacyDisplayProbe.cpp` come from UniXNU-sheng under the same license; `ShengPlatformPower.cpp` comes from it under MIT (its SPDX header).
