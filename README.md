@@ -20,14 +20,16 @@ What QEMU does not cover: the stock bootloader, the board firmware, UFS, touch, 
 | `board.toml` | Board, IPSW, kernel, payload and ADT settings |
 | `configs/qemu_defconfig` | Kernel configuration up to the root mount, and the mockfs test root |
 | `configs/qemu_root_defconfig` | `qemu_defconfig` plus the verified VirtIO block driver, the owner root chain, the SystemOS union mount, the Data mount and the frame buffer display: the original iPadOS userland |
-| `feeds.toml` | IOStorageFamily, which UniXNU's feeds do not list ([UniXNU#7](https://github.com/UniXNU/UniXNU/issues/7)) |
+| `feeds.toml` | IOStorageFamily ([UniXNU#7](https://github.com/UniXNU/UniXNU/issues/7)) and dyld 1165.3 (for `audit-target-display-query.py`), which UniXNU's feeds do not list |
 | `scripts/make-qemu-adt.py` | Device tree: `make-dt.py` (GICv3, NVRAM proxy, memory window, SHA2-384, platform-only AMFI, root matching, the VirtIO MMIO windows of QEMU's own device tree, `vmm-present`) plus the platform seed and the iPad7,1 identity of the board trees; the UFS test nodes of `make-dt.py` are removed |
 | `scripts/build-darwinboot-efi.py` | DarwinBoot as a standalone driver image |
 | `scripts/run-qemu.py` | Stage the ESP, boot, keep the serial log and take screenshots; `--native-user` boots UniXNU's static test process from mockfs, `--os-root` attaches the OS and SystemOS images, `--accel hvf` runs on this Mac's CPU |
 | `scripts/qemu-ps.py` | The guest's processes (PID, state, name) of a running `run-qemu.py`, read from the kernel's `allproc` through the QEMU monitor; `--value` reads kernel globals such as the display's counters, `--log` saves the kernel log |
 | `scripts/qemu_esp.py` | The ESP of a QEMU observation with UniXNU's `gdb-stop.py`: the payload with the kernel step's kernel and extra arguments |
 | `scripts/build-display-abi.py` | The inputs of UniXNU's `audit-mobile-graphics-legacy.py`: this board's kernel as the candidate and the original `IOMobileFramebufferLegacy` observed in QEMU |
-| `scripts/build-native-legacy-display.py`, `package/LegacyDisplayProbe.cpp` | The display archive: UniXNU-sheng's builder and probe reduced to NativeLegacyDisplay, its probe and NativeGOPPresenter, without sheng's touch, HID, key store, CPU frequency, GPU power, log and reset objects |
+| `scripts/build-native-legacy-display.py`, `package/LegacyDisplayProbe.cpp`, `package/KeyStoreProbe.cpp` | The display archive: UniXNU-sheng's builder and probes reduced to NativeLegacyDisplay, its probe, NativeGOPPresenter and the AppleKeyStore stand-in (sheng's `KeyStoreProbe.cpp`, unchanged, and NativeKeyStoreEvents), without sheng's touch, HID, CPU frequency, GPU power, log and reset objects |
+| `scripts/trace-render.py` | Stops at sites of QuartzCore's render path in backboardd (UniXNU's `prepare-original-cpu-render-observer.py` plans) and records registers and memory |
+| `scripts/snapshot-ui-threads.py` | Stops the userland once, after some seconds or when a named process crashes, and reads the threads of the UI processes (saved user registers and frame records) |
 | `scripts/build-storage-abi.py` | The original block storage ABI (`build/storage-abi/interface-audit.json`): makes the inputs of UniXNU's `audit-storage-interface.py` from this board's kernel and runs it |
 | `scripts/build-owner-systemos-policy.py` | The owner-signed SystemOS policy, which no UniXNU script makes ([UniXNU#7](https://github.com/UniXNU/UniXNU/issues/7)) |
 | `scripts/build-os-root.py` | Everything `qemu_root_defconfig` and its payload need besides the kernel step: the storage ABI, the OS and SystemOS images, the owner key, both policies, the policy archive, the verified VirtIO and RAM block drivers, the Data seed, the display archive and the original trust cache bundle |
@@ -97,14 +99,26 @@ python3 out/qemu/tree/scripts/qemu-ps.py          # in a second shell, while it 
 
 `--os-root` attaches the OS disk image read-only (without mounting it) and gives QEMU the raw device and the SystemOS image file as two VirtIO block devices. The kernel picks each disk's policy by its size and checks every block it reads, mounts the OS volume by its UUID and accepts it as the root, mounts SystemOS read-only as a union over `/`, mounts the Data ramdisk at `/private/var` and starts the original `/sbin/launchd`. `qemu-ps.py` shows the userland: under HVF after 2.5 minutes about 210 processes (logd, configd, securityd, lockdownd, usermanagerd, backboardd, SpringBoard and the rest of the system daemons). Memory is tight: the kernel manages the 4 GiB DarwinBoot window only, and about 17 MiB stay free. Without the display (an earlier state of `qemu_root_defconfig`) there were about 120 and no SpringBoard, and no panic in a 30-minute run.
 
-The display: under `offline-mobile-graphics-load=1` the kernel loads IOMobileGraphicsFamily, and the probe creates NativeLegacyDisplay, a subclass of the original `IOMobileFramebufferLegacy`, on the UEFI frame buffer (ramfb, 800x600) and publishes it under `/arm-io` as the system display. SpringBoard starts and stays up. The screen does not change, though: backboardd opens the frame buffer, calls 15 methods (12 of them return unsupported or an error, as on sheng) and never submits a frame. Upstream observed the same in QEMU: backboardd gets no Metal device (`MTLCreateSystemDefaultDevice` returns nil), so the render server has nothing to draw with. On sheng the Adreno GPU provides Metal. The display's counters:
+The display: under `offline-mobile-graphics-load=1` the kernel loads IOMobileGraphicsFamily, and the probe creates NativeLegacyDisplay, a subclass of the original `IOMobileFramebufferLegacy`, on the UEFI frame buffer (ramfb, 800x600) and publishes it under `/arm-io` as the system display. There is no Metal device, and QuartzCore's original CPU renderer draws the frames, which the display copies to the frame buffer. Under HVF the iPadOS welcome screen ("Hello" in turn in each language, with the status bar) appears between 105 and 120 seconds after the start.
+
+What it takes, found with `trace-render.py` and `snapshot-ui-threads.py`, in order from the screen backwards:
+
+1. The render server ignores every update of the built-in display until a client creates a context with `definesDisplayBounds` for it: `CA::WindowServer::IOMFBDisplay::ignore_update_p` returns true while the display mode is the sentinel -1 (a built-in display without `TimingElements`/`ColorElements` has no other mode, as on the hardware) and no update has carried such a context. Until then the screen keeps the boot image.
+2. SpringBoard creates it once it has finished starting. Its main thread waited, in `-[SpringBoard _completeStartupAfterMainSceneConnect:]` → `-[SBHIconManager init]`, on a synchronous XPC request to chronod.
+3. chronod's main thread waited, in its ActivityKit setup, on liveactivitiesd.
+4. liveactivitiesd crashed at every start: `SessionSyncEngine`'s `Keybag.shared` force-unwraps the result of `MKBEventsRegister`, which is NULL without an AppleKeyStore service.
+5. sheng's display archive carries an AppleKeyStore stand-in (NativeKeyStoreEvents, started by `KeyStoreProbe.cpp` with `offline-key-events=1` and `sheng-aks=1`); this repository first left it out as sheng hardware code. With it, the chain completes.
+
+The display's counters:
 
 ```sh
 python3 out/qemu/tree/scripts/qemu-ps.py --value native_legacy_stage --value native_legacy_client_calls \
   --value native_legacy_swap_validation_calls --value native_legacy_frame_count
 ```
 
-`native_legacy_stage` 10 is a started phase-4 display; the swap and frame counters stay 0.
+`native_legacy_stage` 10 is a started phase-4 display.
+
+About 30 seconds later, with no input, iPadOS turns the display off and sleeps the system: `IOPMrootDomain::powerChangeDone` → `IOCPUSleepKernel` → `ArmCpu::haltCPU`, and ArmCpu panics with `unsupported quiesce requested before timer/GIC disable` under `armcpu-diagnostics=1`. Under HVF the panic loop keeps the virtual CPU from exiting, so QEMU's monitor (screenshots, `qemu-ps.py`) stops answering as well.
 
 Each missing piece stops the boot with its own panic:
 
@@ -123,6 +137,7 @@ Gaps of a clean tree that this repository fills:
 - `build-original-system-trust.py` reads `.cache/firmware/target-volumes/static-trustcache.bin`, the payload of the StaticTrustCache IM4P, and the IPSW from `refer/`; neither is produced or linked.
 - The verified NativeVirtioBlock and NativeRamBlock reference NativeUfs hooks (`native_ufs_block_authenticates`, the `native_ufs_store_*` Data store), and the display references sheng's boot progress screen (`boot_progress_*`). They are declared weak, but a static kernel link still needs them: `package/LinkStubs.c` defines them (weak as well) as "not a UFS window", "no store" and "no boot progress screen".
 - The display archive's builder exists only in UniXNU-sheng and compiles sheng's board probes; `audit-mobile-graphics-legacy.py` reads a candidate kernel and an observation of the original class that no script produces, and writes to `build/display-analysis` without creating it. `build-native-legacy-display.py` and `build-display-abi.py` of this repository cover them.
+- `audit-target-display-query.py`, which makes the process layout of the user-space observations, checks `refer/dyld`, which `unixnu` neither fetches nor links; this repository's `feeds.toml` fetches it and `qemu_esp.py` links it.
 
 sheng disables watchdogd with `sheng-disable-watchdogd=1` instead: its boot progress archive writes launchd's `disabled.plist` from the kernel. A copy written into the Data seed on this Mac does not work: launchd only takes the file from uid 0, and the seed's files belong to the user who made it.
 
@@ -142,7 +157,9 @@ sheng disables watchdogd with `sheng-disable-watchdogd=1` instead: its boot prog
 | Data ramdisk at `/private/var` (NativeRamBlock) | works |
 | System daemons | about 120 processes, no panic in a 30-minute run |
 | Frame buffer display (NativeLegacyDisplay) | registered as the system display; backboardd opens it |
-| backboardd, SpringBoard | both run; no frame reaches the screen: no Metal device |
+| AppleKeyStore stand-in (NativeKeyStoreEvents) | liveactivitiesd, chronod and SpringBoard finish starting |
+| CPU-rendered screen | the iPadOS welcome screen, about 2 minutes after the start under HVF |
+| Idle sleep | about 30 seconds later the system sleeps and ArmCpu panics (`unsupported quiesce`); no input device yet |
 
 ## License
 
