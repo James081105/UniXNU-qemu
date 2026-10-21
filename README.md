@@ -21,7 +21,7 @@ What QEMU does not cover: the stock bootloader, the board firmware, UFS, touch, 
 | `configs/qemu_defconfig` | Kernel configuration |
 | `scripts/make-qemu-adt.py` | Device tree: `make-dt.py` (GICv3, NVRAM proxy, memory window, SHA2-384, platform-only AMFI) plus the platform seed and the iPad7,1 identity of the board trees; the UFS test nodes of `make-dt.py` are removed |
 | `scripts/build-darwinboot-efi.py` | DarwinBoot as a standalone driver image |
-| `scripts/run-qemu.py` | Stage the ESP, boot, keep the serial log and take screenshots |
+| `scripts/run-qemu.py` | Stage the ESP, boot, keep the serial log and take screenshots; `--native-user` boots UniXNU's static test process from mockfs |
 | `scripts/build-platform-power.py`, `package/ShengPlatformPower.cpp` | The original-PMGR bridge of UniXNU-sheng (no hardware access) |
 | `scripts/build-link-stubs.py`, `package/LinkStubs.c` | No-op hooks for probes of left-out components |
 | `scripts/build-arm-driver.py`, `scripts/patch-xnu-entry-probe.py`, `scripts/xnu-panic-screen.c` | Copied unchanged from UniXNU-sheng |
@@ -47,6 +47,20 @@ python3 out/qemu/tree/scripts/run-qemu.py --display cocoa
 
 The platform seed in `.cache/platform-seed` is created once per checkout and stays out of Git.
 
+### Test process from mockfs
+
+```sh
+python3 out/qemu/tree/scripts/run-qemu.py --native-user --display cocoa
+```
+
+`--native-user` builds UniXNU's static test process (`build-native-user-fixture.py`) if needed and loads it as the ramdisk; XNU's mockfs (`CONFIG_XNU_SOURCE_MOCKFS`) mounts it on `md0` (`rd=md0`) and serves it as `/sbin/launchd`. The process's own trust cache replaces `kernel.macho.trustcache`, and the run removes `root-matching` from the device tree. The process calls `getpid` and `sysctl hw.pagesize`, stores the results and then loops. Before stopping QEMU the script reads the CPU state and those results through the QEMU monitor:
+
+```
+native user: PC 00000001000003d4 (checkpoint 1000003d4), EL0, getpid 1, sysctl status 0, hw.pagesize 4096
+```
+
+The screen keeps the three entry probe bars over the UniXNU menu: the kernel draws nothing unless it panics.
+
 On a new tree the PMGR bridge has no reference kernel yet: the first `build kernel` links a no-op in its place and says so, and the second links the bridge.
 
 ## State
@@ -58,6 +72,7 @@ On a new tree the PMGR bridge has no reference kernel yet: the first `build kern
 | Platform expert, IOKit start | works |
 | AMFI | starts with the PMGR bridge (`sheng-pmgr=2`); without it the kernel panics with `AMFI: No PMGR?` |
 | BSD start, root mount | stops with `Failed to mount root device`: there is no root volume or storage driver yet |
+| mockfs root on `md0`, first user process (`--native-user`) | works: the test process runs at EL0 as PID 1 and reads a 4 KiB `hw.pagesize` |
 
 ## License
 

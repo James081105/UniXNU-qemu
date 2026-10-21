@@ -36,6 +36,7 @@ archives = [
   "build-arm-driver.py NativeAES",
   "build-native-aes-bindings.py",
   "build-libpthread-kernel.py",
+  "build-mockfs-fixture.py",
   "build-link-stubs.py",
   "build-platform-power.py",
 ]

@@ -7,9 +7,11 @@ keeps the serial log and takes a screenshot over QMP at a fixed interval. Output
 """
 import argparse
 import datetime
+import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import struct
@@ -26,6 +28,9 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--seconds', type=int, default=300, help='stop QEMU after this long')
 parser.add_argument('--every', type=int, default=20, help='seconds between screenshots')
 parser.add_argument('--display', default='none', help='none, or cocoa for a window on this Mac')
+parser.add_argument('--native-user', action='store_true',
+                    help="boot UniXNU's static test process (build-native-user-fixture.py) as launchd from mockfs on md0 "
+                         'and read its results before QEMU stops')
 args = parser.parse_args()
 
 qemu = shutil.which('qemu-system-aarch64')
@@ -51,6 +56,31 @@ config = (esp / 'EFI/UniXNU/unixnu.toml').read_text()
 if 'Payloads/DarwinBoot.efi' not in config:
     raise SystemExit('the payload does not load DarwinBoot as a driver; board.toml [payload] loader must not be "firmware"')
 shutil.copyfile(darwinboot, esp / 'EFI/UniXNU/Payloads/DarwinBoot.efi')
+
+fixture = ROOT / 'build/native-user-fixture'
+if args.native_user:
+    # The test process is the whole md0 image (a single Mach-O, which mockfs serves as /sbin/launchd); its own trust
+    # cache admits it under the platform-only AMFI policy.
+    if not (fixture / 'launchd.macho').is_file():
+        subprocess.run(['python3', ROOT / 'scripts/build-native-user-fixture.py'], check=True)
+    payloads = esp / 'EFI/UniXNU/Payloads'
+    shutil.copyfile(fixture / 'launchd.macho', payloads / 'launchd.macho')
+    shutil.copyfile(fixture / 'trustcache.bundle', payloads / 'kernel.macho.trustcache')
+    if 'initrd = ' in config:
+        raise SystemExit('the payload already has an initrd; build it without --data-ramdisk for --native-user')
+    (esp / 'EFI/UniXNU/unixnu.toml').write_text(
+        config.replace('args = "', 'initrd = "Payloads/launchd.macho"\nargs = "rd=md0 ', 1))
+    spec = importlib.util.spec_from_file_location('make_qemu_adt', ROOT / 'scripts/make-qemu-adt.py')
+    adt_tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(adt_tool)
+    adt = payloads / 'kernel.macho.adt'
+    tree, _ = adt_tool.parse(adt.read_bytes())
+    chosen = adt_tool.child(tree, 'chosen')
+    chosen[1] = [item for item in chosen[1] if item[0] != 'root-matching']   # a memory root, not a matched volume
+    memory_map = adt_tool.child(chosen, 'memory-map')
+    for key in ('RAMDisk', 'TrustCache'):                                      # DarwinBoot fills these placeholders
+        adt_tool.put(memory_map, key, bytes(16))
+    adt.write_bytes(adt_tool.serialize(tree))
 
 work = Path(tempfile.mkdtemp(prefix='unixnu-qemu-'))   # short path: a QMP socket name is limited to 104 bytes
 variables = work / 'vars.fd'
@@ -116,6 +146,26 @@ while time.time() - start < args.seconds and process.poll() is None:
             png(ppm, shots[-1])
     except OSError as error:
         print('screendump failed:', error)
+if args.native_user and process.poll() is None:
+    # Where the CPU is and what the test process stored: getpid() of the first process is 1, and hw.pagesize is
+    # 4096 on the native 4 KiB user ABI. QEMU's "x" reads virtual addresses through the current translation.
+    addresses = json.loads((fixture / 'addresses.json').read_text())
+
+    def hmp(line):
+        reply = qmp('human-monitor-command', **{'command-line': line})
+        return reply.get('return', json.dumps(reply.get('error')))
+
+    registers = hmp('info registers')
+    results = hmp(f'x /4gx {addresses["_results"]:#x}')
+    page = hmp(f'x /1gx {addresses["_user_page_size"]:#x}')
+    (out / 'native-user.txt').write_text(registers + '\n' + results + '\n' + page)
+    pc = re.search(r'\bPC=([0-9a-f]+)', registers)
+    level = re.search(r'\bEL(\d)[th]\b', registers)
+    words = [int(value, 16) for value in re.findall(r'0x([0-9a-f]{16})', results)]
+    size = re.findall(r'0x([0-9a-f]{16})', page)
+    print(f'native user: PC {pc.group(1) if pc else "?"} (checkpoint {addresses["_checkpoint"]:x}), '
+          f'EL{level.group(1) if level else "?"}, getpid {words[0] if words else "?"}, '
+          f'sysctl status {words[1] if len(words) > 1 else "?"}, hw.pagesize {int(size[0], 16) if size else "?"}')
 if process.poll() is None:
     try:
         qmp('quit')
