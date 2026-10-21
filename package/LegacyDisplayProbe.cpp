@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Bounded offline original lifecycle instrument; no desktop claim.
-// LegacyDisplayProbe.cpp of UniXNU-sheng; the late probe no longer starts sheng's key store, CPU frequency, GPU power,
-// touch and HID probes, which are not part of this board's archive.
+// LegacyDisplayProbe.cpp of UniXNU-sheng; the late probe starts sheng's key store probe but no longer its CPU frequency,
+// GPU power, touch and HID probes, which drive sheng hardware and are not part of this board's archive.
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IODeviceTreeSupport.h>
@@ -470,7 +470,9 @@ void native_legacy_display_probe(void) {
     native_legacy_display_checkpoint();
 }
 void native_legacy_display_late_probe(void);
+extern void native_keystore_probe(void);
 void native_legacy_display_late_probe(void) {
+    native_keystore_probe();
     IOService *display=pendingLegacyDisplay;if(!display)return;pendingLegacyDisplay=nullptr;
     native_legacy_surface_status=OSKextLoadKextWithIdentifier("com.apple.iokit.IOSurface");
     OSDictionary *matching=IOService::nameMatching("IOCoreSurfaceRoot");

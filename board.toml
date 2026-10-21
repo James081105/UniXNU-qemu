@@ -103,6 +103,10 @@ trust_cache_sha256 = [
 # (phase 4) on the UEFI frame buffer (gop), at one frame-buffer pixel per point (unit-scale=1), with firmware-powered
 # power management, swap validation, the CPU copy to the frame buffer and retirement of each copied frame. Under
 # qemu_defconfig there is no display, and offline-legacy-register reaches the no-op of package/LinkStubs.c.
+# offline-key-events=1 and sheng-aks=1 start NativeKeyStoreEvents from the same archive, as on sheng: an AppleKeyStore
+# stand-in that answers the state queries (no keybag, no passcode, nothing locked). Without it MKBEventsRegister fails,
+# liveactivitiesd crashes at every start, chronod waits on it and SpringBoard on chronod, so it never takes over the
+# display and the render server ignores every update.
 kernel_args = [
   "-apfs_shared_datavolume",
   "-v",
@@ -122,6 +126,8 @@ kernel_args = [
   "offline-legacy-validate=1",
   "offline-legacy-transfer=1",
   "offline-legacy-cpu-present=1",
+  "offline-key-events=1",
+  "sheng-aks=1",
 ]
 
 [payload.adt]

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Bind an owned concrete backend to the unchanged original Legacy lifecycle.
 
-build-native-legacy-display.py of UniXNU-sheng, reduced to the display: NativeLegacyDisplay, this board's
-LegacyDisplayProbe.cpp and NativeGOPPresenter. The original-class checks and bindings are unchanged. Its inputs come
-from build-display-abi.py (the reference candidate and the observation of the original class).
+build-native-legacy-display.py of UniXNU-sheng, reduced to the display and the key store: NativeLegacyDisplay, this
+board's LegacyDisplayProbe.cpp, NativeGOPPresenter, sheng's KeyStoreProbe.cpp and NativeKeyStoreEvents. The
+original-class checks and bindings are unchanged. Its inputs come from build-display-abi.py (the reference candidate
+and the observation of the original class).
 """
 import hashlib
 import json
@@ -183,11 +184,24 @@ while i<len(args):
 cmd+=['-Wall','-Wextra','-Werror','-Wno-unused-parameter','-Wno-unnecessary-virtual-specifier','-Wno-c99-designator','-Wno-reorder-init-list',
       '-Wno-deprecated-enum-enum-conversion','-I',str(ROOT/'.cache/xnu-work/osfmk')]
 run(cmd,cwd=r['directory'])
-# The display backend and its probe only: sheng's HID, key store, boot process, log, reset, touch, CPU frequency and GPU
+keystore_source=ROOT/'kits/qemu/KeyStoreProbe.cpp'
+keystore_obj=OUT/'KeyStoreProbe.o'
+keystore_cmd=[str(keystore_source) if str(arg)==str(source) else str(keystore_obj) if str(arg)==str(OUT/'LegacyDisplayProbe.o') else arg for arg in cmd]
+run(keystore_cmd,cwd=r['directory'])
+# The display backend, its probe and the key store: sheng's HID, boot process, log, reset, touch, CPU frequency and GPU
 # power objects stay out (they drive sheng hardware or need its kit and NativeAdreno).
 archive=OUT/'libNativeLegacyDisplay.late.a';archive.unlink(missing_ok=True)
-run(['xcrun','ar','rcs',archive,late,OUT/'original-bindings.o',OUT/'LegacyDisplayProbe.o'])
-sources=[ROOT/'drivers/NativeMobileDisplay/NativeLegacyDisplay.cpp',ROOT/'drivers/NativeMobileDisplay/NativeLegacyRequest.h',source]
+print(run(['python3',ROOT/'scripts/build-arm-driver.py','NativeKeyStoreEvents'],text=True),end='')
+keyevents=ROOT/'build/native-keystore-events'
+keyevents_late=keyevents/'NativeKeyStoreEvents.late.o'
+run([llvm/'llvm-objcopy','--remove-section=__DATA,__mod_init_func',
+     '--globalize-symbol=__GLOBAL__sub_I_NativeKeyStoreEvents.cpp',
+     keyevents/'NativeKeyStoreEvents.o',keyevents_late])
+require(code((keyevents/'NativeKeyStoreEvents.o').read_bytes(),macho((keyevents/'NativeKeyStoreEvents.o').read_bytes()))==
+        code(keyevents_late.read_bytes(),macho(keyevents_late.read_bytes())),'Owned event-service instructions unchanged by late init staging')
+run(['xcrun','ar','rcs',archive,late,OUT/'original-bindings.o',OUT/'LegacyDisplayProbe.o',keystore_obj,keyevents_late])
+sources=[ROOT/'drivers/NativeMobileDisplay/NativeLegacyDisplay.cpp',ROOT/'drivers/NativeMobileDisplay/NativeLegacyRequest.h',source,
+         keystore_source,ROOT/'drivers/NativeKeyStoreEvents/NativeKeyStoreEvents.cpp']
 print(run(['python3',ROOT/'scripts/build-arm-driver.py','NativeGOPPresenter'],text=True),end='')
 gop=ROOT/'build/native-gop-presenter';gop_late=gop/'NativeGOPPresenter.late.o'
 run([llvm/'llvm-objcopy','--remove-section=__DATA,__mod_init_func','--globalize-symbol=__GLOBAL__sub_I_NativeGOPPresenter.cpp',
