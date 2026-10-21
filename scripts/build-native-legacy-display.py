@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Bind an owned concrete backend to the unchanged original Legacy lifecycle.
 
-build-native-legacy-display.py of UniXNU-sheng, reduced to the display and the key store: NativeLegacyDisplay, this
-board's LegacyDisplayProbe.cpp, NativeGOPPresenter, sheng's KeyStoreProbe.cpp and NativeKeyStoreEvents. The
-original-class checks and bindings are unchanged. Its inputs come from build-display-abi.py (the reference candidate
-and the observation of the original class).
+build-native-legacy-display.py of UniXNU-sheng, reduced to the display, the key store and the HID input:
+NativeLegacyDisplay, this board's LegacyDisplayProbe.cpp, NativeGOPPresenter, sheng's KeyStoreProbe.cpp and
+NativeKeyStoreEvents, sheng's HidInputProbe.cpp and NativeHidInput, and this board's TouchState.cpp (the finger set
+that sheng's touch panel probe would define). The original-class checks and bindings are unchanged. Its inputs come
+from build-display-abi.py (the reference candidate and the observation of the original class); UniXNU's
+build-native-hid-input.py gets the kernel step's kernel as its reference candidate, which carries the same original
+IOHIDFamily as every kernel of this IPSW.
 """
 import hashlib
 import json
@@ -188,9 +191,21 @@ keystore_source=ROOT/'kits/qemu/KeyStoreProbe.cpp'
 keystore_obj=OUT/'KeyStoreProbe.o'
 keystore_cmd=[str(keystore_source) if str(arg)==str(source) else str(keystore_obj) if str(arg)==str(OUT/'LegacyDisplayProbe.o') else arg for arg in cmd]
 run(keystore_cmd,cwd=r['directory'])
-# The display backend, its probe and the key store: sheng's HID, boot process, log, reset, touch, CPU frequency and GPU
-# power objects stay out (they drive sheng hardware or need its kit and NativeAdreno).
+hid_source=ROOT/'kits/qemu/HidInputProbe.cpp'
+hid_obj=OUT/'HidInputProbe.o'
+run([str(hid_source) if str(arg)==str(source) else str(hid_obj) if str(arg)==str(OUT/'LegacyDisplayProbe.o') else arg for arg in cmd],cwd=r['directory'])
+touch_source=ROOT/'kits/qemu/TouchState.cpp'
+touch_obj=OUT/'TouchState.o'
+run([str(touch_source) if str(arg)==str(source) else str(touch_obj) if str(arg)==str(OUT/'LegacyDisplayProbe.o') else arg for arg in cmd],cwd=r['directory'])
+# The display backend, its probe, the key store and the HID input: sheng's boot process, log, reset, touch panel, CPU
+# frequency and GPU power objects stay out (they drive sheng hardware or need its kit and NativeAdreno).
 archive=OUT/'libNativeLegacyDisplay.late.a';archive.unlink(missing_ok=True)
+kernel=ROOT.parent/'kernel/kernel.macho'
+reference=ROOT/'build/native-prelink/native-owner-ufs-cpu-desktop-qemu-candidate.macho'
+reference.parent.mkdir(parents=True,exist_ok=True)
+reference.write_bytes(kernel.read_bytes());reference.with_suffix('.json').write_bytes(kernel.with_suffix('.json').read_bytes())
+print(run(['python3',ROOT/'scripts/build-native-hid-input.py'],text=True),end='')
+hid_dir=ROOT/'build/native-hid-input'
 print(run(['python3',ROOT/'scripts/build-arm-driver.py','NativeKeyStoreEvents'],text=True),end='')
 keyevents=ROOT/'build/native-keystore-events'
 keyevents_late=keyevents/'NativeKeyStoreEvents.late.o'
@@ -199,9 +214,11 @@ run([llvm/'llvm-objcopy','--remove-section=__DATA,__mod_init_func',
      keyevents/'NativeKeyStoreEvents.o',keyevents_late])
 require(code((keyevents/'NativeKeyStoreEvents.o').read_bytes(),macho((keyevents/'NativeKeyStoreEvents.o').read_bytes()))==
         code(keyevents_late.read_bytes(),macho(keyevents_late.read_bytes())),'Owned event-service instructions unchanged by late init staging')
-run(['xcrun','ar','rcs',archive,late,OUT/'original-bindings.o',OUT/'LegacyDisplayProbe.o',keystore_obj,keyevents_late])
+run(['xcrun','ar','rcs',archive,late,OUT/'original-bindings.o',OUT/'LegacyDisplayProbe.o',keystore_obj,keyevents_late,
+     hid_obj,touch_obj,hid_dir/'NativeHidInput.late.o',hid_dir/'hid-original-bindings.o'])
 sources=[ROOT/'drivers/NativeMobileDisplay/NativeLegacyDisplay.cpp',ROOT/'drivers/NativeMobileDisplay/NativeLegacyRequest.h',source,
-         keystore_source,ROOT/'drivers/NativeKeyStoreEvents/NativeKeyStoreEvents.cpp']
+         keystore_source,ROOT/'drivers/NativeKeyStoreEvents/NativeKeyStoreEvents.cpp',hid_source,touch_source,
+         ROOT/'drivers/NativeHidInput/NativeHidInput.cpp',ROOT/'scripts/build-native-hid-input.py']
 print(run(['python3',ROOT/'scripts/build-arm-driver.py','NativeGOPPresenter'],text=True),end='')
 gop=ROOT/'build/native-gop-presenter';gop_late=gop/'NativeGOPPresenter.late.o'
 run([llvm/'llvm-objcopy','--remove-section=__DATA,__mod_init_func','--globalize-symbol=__GLOBAL__sub_I_NativeGOPPresenter.cpp',
