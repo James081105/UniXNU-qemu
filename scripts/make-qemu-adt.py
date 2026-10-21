@@ -115,6 +115,9 @@ def main():
     if args.packed_data_ramdisk:
         put(chosen, 'ephemeral-storage', struct.pack('<I', 1))
         put(child(chosen, 'memory-map'), 'PackedRAMDisk', bytes(16))
+    # /defaults/sleep-disabled: IOPMrootDomain refuses every system sleep (gSleepDisabledFlag, read once boot has
+    # completed). ArmCpu cannot quiesce the CPU, and an idle sleep would end in its "unsupported quiesce" panic.
+    put(child(tree, 'defaults'), 'sleep-disabled', struct.pack('<I', 1))
     arm_io = child(tree, 'arm-io')
     arm_io[2] = [c for c in arm_io[2] if c[0] not in ('ufshc', 'ufsphy')]
     if args.ipad_identity:
