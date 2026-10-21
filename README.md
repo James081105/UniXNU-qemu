@@ -19,15 +19,18 @@ What QEMU does not cover: the stock bootloader, the board firmware, UFS, touch, 
 | --- | --- |
 | `board.toml` | Board, IPSW, kernel, payload and ADT settings |
 | `configs/qemu_defconfig` | Kernel configuration up to the root mount, and the mockfs test root |
-| `configs/qemu_root_defconfig` | `qemu_defconfig` plus the verified VirtIO block driver, the owner root chain, the SystemOS union mount and the Data mount: the original iPadOS userland |
+| `configs/qemu_root_defconfig` | `qemu_defconfig` plus the verified VirtIO block driver, the owner root chain, the SystemOS union mount, the Data mount and the frame buffer display: the original iPadOS userland |
 | `feeds.toml` | IOStorageFamily, which UniXNU's feeds do not list ([UniXNU#7](https://github.com/UniXNU/UniXNU/issues/7)) |
 | `scripts/make-qemu-adt.py` | Device tree: `make-dt.py` (GICv3, NVRAM proxy, memory window, SHA2-384, platform-only AMFI, root matching, the VirtIO MMIO windows of QEMU's own device tree, `vmm-present`) plus the platform seed and the iPad7,1 identity of the board trees; the UFS test nodes of `make-dt.py` are removed |
 | `scripts/build-darwinboot-efi.py` | DarwinBoot as a standalone driver image |
 | `scripts/run-qemu.py` | Stage the ESP, boot, keep the serial log and take screenshots; `--native-user` boots UniXNU's static test process from mockfs, `--os-root` attaches the OS and SystemOS images |
-| `scripts/qemu-ps.py` | The guest's processes (PID, state, name) of a running `run-qemu.py`, read from the kernel's `allproc` through the QEMU monitor |
+| `scripts/qemu-ps.py` | The guest's processes (PID, state, name) of a running `run-qemu.py`, read from the kernel's `allproc` through the QEMU monitor; `--value` reads kernel globals such as the display's counters |
+| `scripts/qemu_esp.py` | The ESP of a QEMU observation with UniXNU's `gdb-stop.py`: the payload with the kernel step's kernel and extra arguments |
+| `scripts/build-display-abi.py` | The inputs of UniXNU's `audit-mobile-graphics-legacy.py`: this board's kernel as the candidate and the original `IOMobileFramebufferLegacy` observed in QEMU |
+| `scripts/build-native-legacy-display.py`, `package/LegacyDisplayProbe.cpp` | The display archive: UniXNU-sheng's builder and probe reduced to NativeLegacyDisplay, its probe and NativeGOPPresenter, without sheng's touch, HID, key store, CPU frequency, GPU power, log and reset objects |
 | `scripts/build-storage-abi.py` | The original block storage ABI (`build/storage-abi/interface-audit.json`): makes the inputs of UniXNU's `audit-storage-interface.py` from this board's kernel and runs it |
 | `scripts/build-owner-systemos-policy.py` | The owner-signed SystemOS policy, which no UniXNU script makes ([UniXNU#7](https://github.com/UniXNU/UniXNU/issues/7)) |
-| `scripts/build-os-root.py` | Everything `qemu_root_defconfig` and its payload need besides the kernel step: the storage ABI, the OS and SystemOS images, the owner key, both policies, the policy archive, the verified VirtIO and RAM block drivers, the Data seed and the original trust cache bundle |
+| `scripts/build-os-root.py` | Everything `qemu_root_defconfig` and its payload need besides the kernel step: the storage ABI, the OS and SystemOS images, the owner key, both policies, the policy archive, the verified VirtIO and RAM block drivers, the Data seed, the display archive and the original trust cache bundle |
 | `scripts/build-platform-power.py`, `package/ShengPlatformPower.cpp` | The original-PMGR bridge of UniXNU-sheng (no hardware access) |
 | `scripts/build-link-stubs.py`, `package/LinkStubs.c` | No-op hooks for probes of left-out components |
 | `scripts/build-arm-driver.py`, `scripts/patch-xnu-entry-probe.py`, `scripts/xnu-panic-screen.c` | Copied unchanged from UniXNU-sheng |
@@ -88,7 +91,16 @@ python3 out/qemu/tree/scripts/qemu-ps.py          # in a second shell, while it 
 
 `build-os-root.py` skips each step whose output exists. The first run boots the `qemu_defconfig` kernel in QEMU once (for the storage ABI), signs and checks the 1,483,785 blocks of the OS disk image and the 806,400 blocks of the SystemOS image, and attaches the OS image read-only for the time of the OS policy and the Data seed. The owner private key stays in `out/qemu/tree/build/verified-root-host/keys`; a new key needs new policies, a new kernel and payload. The Data seed and its volume UUID stay in `.cache/firmware/owner-data` of this repository; `qemu_root_defconfig` takes the UUID from the environment because every seed has its own.
 
-`--os-root` attaches the OS disk image read-only (without mounting it) and gives QEMU the raw device and the SystemOS image file as two VirtIO block devices. The kernel picks each disk's policy by its size and checks every block it reads, mounts the OS volume by its UUID and accepts it as the root, mounts SystemOS read-only as a union over `/`, mounts the Data ramdisk at `/private/var` and starts the original `/sbin/launchd`. The screen keeps the entry probe bars; `qemu-ps.py` shows the userland: after 5 minutes about 120 processes (logd, configd, securityd, lockdownd, usermanagerd, backboardd and the rest of the system daemons) and no panic in a 30-minute run. SpringBoard does not start: there is no display for backboardd.
+`--os-root` attaches the OS disk image read-only (without mounting it) and gives QEMU the raw device and the SystemOS image file as two VirtIO block devices. The kernel picks each disk's policy by its size and checks every block it reads, mounts the OS volume by its UUID and accepts it as the root, mounts SystemOS read-only as a union over `/`, mounts the Data ramdisk at `/private/var` and starts the original `/sbin/launchd`. `qemu-ps.py` shows the userland: after 5 minutes about 140 processes (logd, configd, securityd, lockdownd, usermanagerd, backboardd, SpringBoard and the rest of the system daemons). Without the display (an earlier state of `qemu_root_defconfig`) there were about 120 and no SpringBoard, and no panic in a 30-minute run.
+
+The display: under `offline-mobile-graphics-load=1` the kernel loads IOMobileGraphicsFamily, and the probe creates NativeLegacyDisplay, a subclass of the original `IOMobileFramebufferLegacy`, on the UEFI frame buffer (ramfb, 800x600) and publishes it under `/arm-io` as the system display. SpringBoard starts and stays up. The screen does not change, though: backboardd opens the frame buffer, calls 15 methods (12 of them return unsupported or an error, as on sheng) and never submits a frame. Upstream observed the same in QEMU: backboardd gets no Metal device (`MTLCreateSystemDefaultDevice` returns nil), so the render server has nothing to draw with. On sheng the Adreno GPU provides Metal. The display's counters:
+
+```sh
+python3 out/qemu/tree/scripts/qemu-ps.py --value native_legacy_stage --value native_legacy_client_calls \
+  --value native_legacy_swap_validation_calls --value native_legacy_frame_count
+```
+
+`native_legacy_stage` 10 is a started phase-4 display; the swap and frame counters stay 0.
 
 Each missing piece stops the boot with its own panic:
 
@@ -105,7 +117,8 @@ Gaps of a clean tree that this repository fills:
 - No UniXNU script makes the SystemOS policy that `build-verified-root-probe.py --include-systemos` reads; `build-owner-systemos-policy.py` does.
 - `build-verified-root-probe.py` compiles with the bsd compile record and `-Werror`; the record names `build/xnu/ios-obj/EXPORT_HDRS/libsa`, which the kernel build does not create (it creates the one under `build/xnu/obj`).
 - `build-original-system-trust.py` reads `.cache/firmware/target-volumes/static-trustcache.bin`, the payload of the StaticTrustCache IM4P, and the IPSW from `refer/`; neither is produced or linked.
-- The verified NativeVirtioBlock and NativeRamBlock reference NativeUfs hooks (`native_ufs_block_authenticates`, the `native_ufs_store_*` Data store). They are declared weak, but a static kernel link still needs them: `package/LinkStubs.c` defines them as "not a UFS window" and "no store".
+- The verified NativeVirtioBlock and NativeRamBlock reference NativeUfs hooks (`native_ufs_block_authenticates`, the `native_ufs_store_*` Data store), and the display references sheng's boot progress screen (`boot_progress_*`). They are declared weak, but a static kernel link still needs them: `package/LinkStubs.c` defines them (weak as well) as "not a UFS window", "no store" and "no boot progress screen".
+- The display archive's builder exists only in UniXNU-sheng and compiles sheng's board probes; `audit-mobile-graphics-legacy.py` reads a candidate kernel and an observation of the original class that no script produces, and writes to `build/display-analysis` without creating it. `build-native-legacy-display.py` and `build-display-abi.py` of this repository cover them.
 
 sheng disables watchdogd with `sheng-disable-watchdogd=1` instead: its boot progress archive writes launchd's `disabled.plist` from the kernel. A copy written into the Data seed on this Mac does not work: launchd only takes the file from uid 0, and the seed's files belong to the user who made it.
 
@@ -124,8 +137,9 @@ sheng disables watchdogd with `sheng-disable-watchdogd=1` instead: its boot prog
 | SystemOS union mount, dyld shared cache | works |
 | Data ramdisk at `/private/var` (NativeRamBlock) | works |
 | System daemons | about 120 processes, no panic in a 30-minute run |
-| backboardd, SpringBoard | backboardd runs; SpringBoard does not start without a display |
+| Frame buffer display (NativeLegacyDisplay) | registered as the system display; backboardd opens it |
+| backboardd, SpringBoard | both run; no frame reaches the screen: no Metal device |
 
 ## License
 
-BSD-2-Clause-Patent. See [LICENSE](LICENSE). The copied scripts and `ShengPlatformPower.cpp` come from UniXNU-sheng under the same license.
+BSD-2-Clause-Patent. See [LICENSE](LICENSE). The copied and adapted scripts, `ShengPlatformPower.cpp` and `LegacyDisplayProbe.cpp` come from UniXNU-sheng under the same license.
