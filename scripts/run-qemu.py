@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import shutil
 import socket
@@ -31,7 +32,12 @@ parser.add_argument('--display', default='none', help='none, or cocoa for a wind
 parser.add_argument('--native-user', action='store_true',
                     help="boot UniXNU's static test process (build-native-user-fixture.py) as launchd from mockfs on md0 "
                          'and read its results before QEMU stops')
+parser.add_argument('--os-root', action='store_true',
+                    help='attach the OS disk image of the IPSW read-only as a VirtIO block device, the root of a kernel '
+                         'built with qemu_root_defconfig (scripts/build-os-root.py)')
 args = parser.parse_args()
+if args.native_user and args.os_root:
+    parser.error('--native-user boots from md0; leave out --os-root')
 
 qemu = shutil.which('qemu-system-aarch64')
 if not qemu:
@@ -94,6 +100,23 @@ command = [qemu, '-M', 'virt,virtualization=off,secure=off,gic-version=3', '-acc
            '-device', 'ramfb', '-device', 'qemu-xhci', '-device', 'usb-kbd', '-nic', 'none',
            '-display', args.display, '-no-reboot',
            '-serial', f'file:{out / "serial.log"}', '-qmp', f'unix:{sock},server=on,wait=off']
+if args.os_root:
+    # The whole disk image as the host sees it, read through its read-only attachment; the policy that
+    # build-owner-os-policy.py signed covers exactly these bytes.
+    image = ROOT / '.cache/firmware/target-volumes/044-76040-038.dmg'
+    if not image.is_file():
+        raise SystemExit(f'{image} missing (scripts/build-os-root.py)')
+    attached = [i for i in plistlib.loads(subprocess.check_output(['hdiutil', 'info', '-plist']))['images']
+                if Path(i['image-path']).resolve() == image.resolve() and i.get('writeable') is False]
+    if not attached:
+        attached = [plistlib.loads(subprocess.check_output(['hdiutil', 'attach', '-nomount', '-readonly', '-noverify',
+                                                            '-noautofsck', '-plist', image]))]
+    disk = next(e['dev-entry'] for e in attached[0]['system-entities'] if e.get('content-hint') == 'GUID_partition_scheme')
+    command += ['-global', 'virtio-mmio.force-legacy=false', '-blockdev', json.dumps({
+                    'driver': 'raw', 'node-name': 'os', 'read-only': True,
+                    'file': {'driver': 'host_device', 'filename': '/dev/r' + Path(disk).name, 'read-only': True,
+                             'locking': 'off'}}),
+                '-device', 'virtio-blk-device,drive=os']
 (out / 'command.txt').write_text(' '.join(str(part) for part in command) + '\n')
 process = subprocess.Popen([str(part) for part in command], stdout=open(out / 'qemu.log', 'w'), stderr=subprocess.STDOUT)
 

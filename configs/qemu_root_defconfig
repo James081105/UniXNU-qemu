@@ -1,0 +1,33 @@
+# Kernel configuration of the QEMU virt image with the original OS volume as the root: qemu_defconfig plus
+# NativeVirtioBlock in verified mode and the owner root chain. The OS disk image is attached read-only as a VirtIO
+# block device (run-qemu.py --os-root); every block the kernel reads is checked against the owner-signed OS policy,
+# and the root that APFS cannot authenticate without Apple's boot manifest is accepted because it is that device.
+#
+# The two archives are made outside the kernel step, from a kernel built with qemu_defconfig
+# (scripts/build-os-root.py). SystemOS is left out: no UniXNU script makes its policy (UniXNU#7), so launchd has no
+# dyld shared cache.
+
+CONFIG_XNU_SOURCE_CORECRYPTO14=y
+CONFIG_XNU_SOURCE_PTHREAD=y
+CONFIG_XNU_ARM_DT_PLATFORM=y
+CONFIG_XNU_ARMCPU=y
+CONFIG_XNU_NATIVE_AES=y
+CONFIG_XNU_TRUST_CACHE_RUNTIME=y
+CONFIG_XNU_NATIVE_CS_HASH_CACHE=y
+CONFIG_XNU_DT_PANIC_REGION=y
+CONFIG_XNU_NATIVE_ARCH_TIMER=y
+CONFIG_XNU_NATIVE_PAN=y
+CONFIG_XNU_SHENG_PMGR=y
+CONFIG_XNU_SOURCE_MOCKFS=y
+CONFIG_XNU_NATIVE_VIRTIO_BLOCK=y
+CONFIG_XNU_VERIFIED_ROOT_PROBE=y
+CONFIG_XNU_OWNER_ROOT_AUDIT=y
+CONFIG_XNU_OWNER_ROOT_TRUST=y
+
+CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
+CONFIG_XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE="{tree}/build/native-virtio-block-verified/libNativeVirtioBlock.a"
+CONFIG_XNU_VERIFIED_ROOT_ARCHIVE="{tree}/build/verified-root-os-xnu/libVerifiedRootProbe.a"
+# No-op hooks for probes of the left-out components (scripts/build-link-stubs.py).
+CONFIG_XNU_EXTRA_LD_ARCHIVES="{tree}/build/link-stubs/libLinkStubs.a"
+CONFIG_XNU_NATIVE_MOBILE_DISPLAY=n
+CONFIG_XNU_ARMVIRT_PLATFORM=n

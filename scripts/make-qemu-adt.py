@@ -2,14 +2,15 @@
 """Generate the Apple-format device tree of the QEMU virt machine that scripts/run-qemu.py starts.
 
 It takes the [payload.adt] options the unixnu driver passes to every board tool. UniXNU's scripts/qemu-entry/make-dt.py
-describes the machine (GICv3, timer, NVRAM proxy, memory window); this script then adds what the board trees carry and
-make-dt.py does not: the platform seed, root matching and, with --ipad-identity, the iPad7,1 identity of the sheng and
-pipa trees. It
+describes the machine (GICv3, timer, NVRAM proxy, memory window, root matching, and the VirtIO MMIO windows from the
+device tree QEMU itself generates for the same machine); this script then adds what the board trees carry and
+make-dt.py does not: the platform seed and, with --ipad-identity, the iPad7,1 identity of the sheng and pipa trees. It
 removes the UFS nodes make-dt.py adds for UniXNU's own UFS tests, as QEMU has no UFS controller.
 """
 from pathlib import Path
 import argparse
 import os
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -87,7 +88,18 @@ def main():
         command.append('--trust-cache')
     if cpus > 1:
         command += ['--smp', str(cpus)]
+    qemu = shutil.which('qemu-system-aarch64')
+    if not qemu:
+        raise SystemExit('qemu-system-aarch64 not found (brew install qemu)')
     with tempfile.TemporaryDirectory() as scratch:
+        # The machine of run-qemu.py, whose memory is dram_size.
+        fdt = Path(scratch) / 'virt.dtb'
+        subprocess.run([qemu, '-M', f'virt,virtualization=off,secure=off,gic-version=3,dumpdtb={fdt}', '-cpu', 'cortex-a710',
+                        '-m', str(args.dram_size >> 20), '-smp', str(cpus), '-display', 'none', '-nodefaults'],
+                       check=True, capture_output=True)
+        command += ['--virtio-mmio-fdt', fdt]
+        if args.root_match_volume_uuid:
+            command += ['--root-match-volume-uuid', args.root_match_volume_uuid]
         base = Path(scratch) / 'base.adt'
         subprocess.run([str(part) for part in command + ['--output', base]], check=True)
         tree, end = parse(base.read_bytes())
@@ -98,11 +110,6 @@ def main():
     if args.unique_chip_id is not None:
         put(chosen, 'unique-chip-id', struct.pack('<Q', args.unique_chip_id))
         put(chosen, 'chip-id', struct.pack('<I', args.chip_id))
-    if args.root_match_volume_uuid:
-        # Written here as the board tools write it: make-dt.py accepts it only together with a described disk.
-        put(chosen, 'root-matching', ('<dict><key>IOProviderClass</key><string>IOMedia</string>'
-                                      '<key>IOPropertyMatch</key><dict><key>UUID</key><string>' +
-                                      args.root_match_volume_uuid.upper() + '</string></dict></dict>\0').encode())
     if args.packed_data_ramdisk:
         put(chosen, 'ephemeral-storage', struct.pack('<I', 1))
         put(child(chosen, 'memory-map'), 'PackedRAMDisk', bytes(16))

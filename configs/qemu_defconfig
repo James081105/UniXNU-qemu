@@ -4,7 +4,7 @@
 # the root, as on the tablets.
 #
 # Left out until their inputs exist: NATIVE_UFS (SM8550 registers), the owner root chain
-# (VERIFIED_ROOT_PROBE, OWNER_*; it needs owner-signed volume policies), BOOT_PROGRESS (it requires that chain),
+# (VERIFIED_ROOT_PROBE, OWNER_*; it needs owner-signed volume policies, see qemu_root_defconfig), BOOT_PROGRESS (it requires that chain),
 # NATIVE_LEGACY_DISPLAY (its archive carries the sheng board probes), NATIVE_RAM_BLOCK (no Data yet) and
 # NATIVE_ADRENO. SHENG_PMGR links the original-PMGR bridge (scripts/build-platform-power.py), without which the
 # original AMFI panics with "No PMGR". XNU's video console draws nothing here despite -v: after the entry probe bars,
