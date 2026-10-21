@@ -18,22 +18,18 @@ them from this board's own kernel, then runs the audit unchanged:
 Run in the build tree after "unixnu build kernel" and "unixnu build payload". Takes a few minutes under TCG.
 """
 import json
-import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
-WORK = ROOT.parent
+from qemu_esp import ROOT, WORK, stage
+
 AUDIT = ROOT / 'scripts/audit-storage-interface.py'
 kernel = WORK / 'kernel/kernel.macho'
-payload = WORK / 'payload/payload.img'
-unixnu = WORK / 'package/Build/Out/AARCH64-DEBUG/UniXNU.efi'
-for path, step in ((kernel, 'unixnu build kernel'), (payload, 'unixnu build payload'), (unixnu, 'unixnu build package')):
-    if not path.is_file():
-        raise SystemExit(f'{path} missing ({step})')
+if not kernel.is_file():
+    raise SystemExit(f'{kernel} missing (unixnu build kernel)')
 refer = ROOT / 'refer/IOStorageFamily'
 if not refer.is_dir():
     # unixnu links only the references its steps name; this board's feeds.toml adds IOStorageFamily.
@@ -42,9 +38,6 @@ if not refer.is_dir():
         raise SystemExit('IOStorageFamily not fetched: run "unixnu fetch" with this device repository')
     refer.parent.mkdir(exist_ok=True)
     refer.symlink_to(fetched[0])
-darwinboot = ROOT / 'build/darwinboot-efi/DarwinBoot.efi'
-if not darwinboot.is_file():
-    subprocess.run([sys.executable, ROOT / 'scripts/build-darwinboot-efi.py'], check=True)
 
 candidate = ROOT / 'build/native-prelink/native-apfs-load-positive.macho'
 candidate.parent.mkdir(parents=True, exist_ok=True)
@@ -76,16 +69,7 @@ status = symbol('_native_apfs_load_status')
 
 out = ROOT / 'build/darwinboot-storage-native-metadata'
 esp = out / 'esp'
-shutil.rmtree(esp, ignore_errors=True)
-esp.mkdir(parents=True)
-subprocess.run(['mcopy', '-s', '-n', '-i', payload, '::/EFI', esp], check=True, env=dict(os.environ, MTOOLS_SKIP_CHECK='1'))
-(esp / 'EFI/BOOT').mkdir(parents=True, exist_ok=True)
-shutil.copyfile(unixnu, esp / 'EFI/BOOT/BOOTAA64.EFI')
-payloads = esp / 'EFI/UniXNU/Payloads'
-shutil.copyfile(darwinboot, payloads / 'DarwinBoot.efi')
-shutil.copyfile(candidate, payloads / 'kernel.macho')     # the payload's copy carries the panic screen patch
-config = esp / 'EFI/UniXNU/unixnu.toml'
-config.write_text(config.read_text().replace('args = "', 'args = "offline-apfs-load=1 ', 1))
+stage(esp, candidate, 'offline-apfs-load=1')
 
 requests = [f'{meta:x}:50', f'{service_meta:x}:50', f'{status:x}:4']
 # 8 GiB: the 4 GiB DarwinBoot window does not fit in the 4 GiB size below it, and gdb-stop.py offers no 6 GiB.
