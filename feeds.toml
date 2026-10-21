@@ -1,0 +1,10 @@
+# Sources this board adds to the feeds.toml of UniXNU.
+
+# Public Darwin 23 IOStorageFamily: scripts/audit-storage-interface.py builds the block storage ABI of the VirtIO root
+# from it and checks this exact commit.
+[[source]]
+name = "IOStorageFamily"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/IOStorageFamily.git"
+ref = "IOStorageFamily-315"
+commit = "e45fbe30a7879e0b16e26dddb78538f1b00e0bff"
