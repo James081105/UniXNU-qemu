@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Drive NativeHidInput through UniXNU's live HID mailbox and take screenshots.
 
-  live-input.py [--accel hvf|tcg] [--wait SECONDS] STEP...
+  live-input.py [--accel hvf|tcg] [--wait SECONDS] [--crash PROCESS] STEP...
 
 gdb-stop.py boots the qemu_root_defconfig payload with the OS and SystemOS disks and --live-hid-dir: once a second,
 when NativeHidInput's timer reaches native_hid_live_checkpoint, it applies the newest command of the mailbox
@@ -17,7 +17,9 @@ steps in order:
   sleep N              wait N seconds
 
 Every command takes effect at the next checkpoint, so a touch moves once a second. Then it stops the guest. Nothing
-else in the guest is changed. Run in the build tree.
+else in the guest is changed. --crash stops the guest instead when the named process (its 16-character kernel name)
+reports its crash (task_exception_notify), with the exiting thread's saved user state in the report, as
+snapshot-ui-threads.py --crash does. Run in the build tree.
 """
 import argparse
 import json
@@ -29,11 +31,12 @@ import subprocess
 import sys
 import time
 
-from qemu_esp import ROOT, WORK, stage
+from qemu_esp import ROOT, WORK, link_dyld, stage
 
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument('--accel', choices=('hvf', 'tcg'), default='hvf')
 parser.add_argument('--wait', type=int, default=20, help='seconds after the first presented frames')
+parser.add_argument('--crash', metavar='PROCESS', help='stop when this process reports its crash')
 parser.add_argument('steps', nargs='+')
 args = parser.parse_args()
 
@@ -52,8 +55,20 @@ mailbox.mkdir(parents=True, exist_ok=True)
 for name in ('command.json', 'status.json'):
     (mailbox / name).unlink(missing_ok=True)
 stage(out / 'esp', kernel)
-panic = re.search(r'^([0-9a-f]{16}) \w _panic$', symbols, re.M)[1]
-guest = subprocess.Popen([sys.executable, ROOT / 'scripts/qemu-entry/gdb-stop.py', '0x' + panic, '--esp', out / 'esp',
+
+
+def address(name):
+    return '0x' + re.search(rf'^([0-9a-f]{{16}}) \w {name}$', symbols, re.M)[1]
+
+
+stop = [address('_panic')]
+if args.crash:
+    link_dyld()
+    subprocess.run([sys.executable, ROOT / 'scripts/audit-target-display-query.py'], check=True)
+    stop = [address('_task_exception_notify'), '--entry-process-name', args.crash, '--entry-max-skips', '65536',
+            '--inspect-entry-user-state', '--process-layout-plan', ROOT / 'build/display-analysis/query-plan.json',
+            '--system-registers']
+guest = subprocess.Popen([sys.executable, ROOT / 'scripts/qemu-entry/gdb-stop.py', *stop, '--esp', out / 'esp',
                           '--kernel', kernel, '--fixture', out, '--qemu-ramfb', '--capture-screen', '--gic-version', '3',
                           '--qemu-memory-mib', '8192', '--qemu-accel', args.accel, '--live-hid-dir', mailbox,
                           '--virtio-udif-image', image, '--virtio-extra-block-image', volumes / '044-76034-038.dmg',

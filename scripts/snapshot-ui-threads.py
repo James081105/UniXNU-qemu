@@ -53,8 +53,10 @@ if not attached:
 
 out = ROOT / 'build/ui-threads' / (f'crash-{args.crash}' if args.crash else 'interrupt')
 stage(out / 'esp', kernel)
-stop = ['0x' + symbol('_task_exception_notify'), '--entry-process-name', args.crash, '--entry-max-skips', '65536'] \
-    if args.crash else ['0x' + symbol('_panic')]
+# At the crash the exiting thread's own saved state (PC, LR, frame pointer, ESR, FAR) is read as well: the process may
+# not be one of thread_snapshot.py's names.
+stop = ['0x' + symbol('_task_exception_notify'), '--entry-process-name', args.crash, '--entry-max-skips', '65536',
+        '--inspect-entry-user-state'] if args.crash else ['0x' + symbol('_panic')]
 subprocess.run([sys.executable, ROOT / 'scripts/qemu-entry/gdb-stop.py', *stop, '--esp', out / 'esp',
                 '--kernel', kernel, '--fixture', out, '--qemu-ramfb', '--gic-version', '3', '--qemu-memory-mib', '8192',
                 '--qemu-accel', args.accel, '--system-registers', '--process-layout-plan', plan,
