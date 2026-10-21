@@ -118,7 +118,7 @@ python3 out/qemu/tree/scripts/qemu-ps.py --value native_legacy_stage --value nat
 
 `native_legacy_stage` 10 is a started phase-4 display.
 
-About 30 seconds later, with no input, iPadOS turns the display off and sleeps the system: `IOPMrootDomain::powerChangeDone` → `IOCPUSleepKernel` → `ArmCpu::haltCPU`, and ArmCpu panics with `unsupported quiesce requested before timer/GIC disable` under `armcpu-diagnostics=1`. Under HVF the panic loop keeps the virtual CPU from exiting, so QEMU's monitor (screenshots, `qemu-ps.py`) stops answering as well.
+Without input, iPadOS would turn the display off about 30 seconds later and sleep the system: `IOPMrootDomain::powerChangeDone` → `IOCPUSleepKernel` → `ArmCpu::haltCPU`, and ArmCpu panics with `unsupported quiesce requested before timer/GIC disable` under `armcpu-diagnostics=1`. Under HVF the panic loop keeps the virtual CPU from exiting, so QEMU's monitor (screenshots, `qemu-ps.py`) stops answering as well. `build-os-root.py` therefore puts SpringBoard's `SBDisableAutoDim`, `SBDontDimOrLockOnAC` and `SBDisableIdleSleep` into the Data seed (`mobile/Library/Preferences/com.apple.springboard.plist`, owned by uid 501, which is mobile); the display then stays on (checked for 6 minutes).
 
 Each missing piece stops the boot with its own panic:
 
@@ -159,7 +159,8 @@ sheng disables watchdogd with `sheng-disable-watchdogd=1` instead: its boot prog
 | Frame buffer display (NativeLegacyDisplay) | registered as the system display; backboardd opens it |
 | AppleKeyStore stand-in (NativeKeyStoreEvents) | liveactivitiesd, chronod and SpringBoard finish starting |
 | CPU-rendered screen | the iPadOS welcome screen, about 2 minutes after the start under HVF |
-| Idle sleep | about 30 seconds later the system sleeps and ArmCpu panics (`unsupported quiesce`); no input device yet |
+| Idle sleep | kept off by SpringBoard preferences in the Data seed; without them the system sleeps and ArmCpu panics (`unsupported quiesce`) |
+| Keyboard, pointer, touch | none yet |
 
 ## License
 

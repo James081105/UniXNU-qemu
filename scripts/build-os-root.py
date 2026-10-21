@@ -18,7 +18,9 @@ Run in the build tree after "unixnu build package kernel payload" with qemu_defc
 8. The Data seed grown to 1 GiB and packed for DarwinBoot (DBRDISK1). 32 MiB fills up within two minutes of the
    userland (backboardd then crashes with ENOSPC). NativeRamBlock keeps a seed of up to 2 GiB in memory and allocates
    a page on its first write; a larger one waits for sheng's UFS store before it accepts writes. UniXNU's
-   seed-data-grow.py makes 3 GiB and more only, so the container is grown here the same way.
+   seed-data-grow.py makes 3 GiB and more only, so the container is grown here the same way. SpringBoard's
+   preferences in the seed keep the display on: without input, iPadOS turns it off half a minute after the welcome
+   screen appears and sleeps the system, which ArmCpu does not support.
 9. The display: build-display-abi.py (the original IOMobileFramebufferLegacy observed in QEMU once) and
    build-native-legacy-display.py (NativeLegacyDisplay, LegacyDisplayProbe and NativeGOPPresenter).
 10. build-original-system-trust.py: the original static and System trust caches as one bundle, the payload's
@@ -113,6 +115,20 @@ if not seed.is_file():
         blocks = int.from_bytes(header[40:48], 'little')
         if header[32:36] != b'NXSB' or not (1 << 30) - (64 << 20) <= blocks * 4096 <= 1 << 30:
             raise SystemExit('The grown Data seed is not a 1 GiB APFS container')
+        # The seed's files belong to uid 501, which is mobile on iPadOS, the user SpringBoard and its cfprefsd run as.
+        mount = data / 'mount'
+        attached = plistlib.loads(subprocess.check_output(['hdiutil', 'attach', '-imagekey', 'diskimage-class=CRawDiskImage',
+                                                           '-nobrowse', '-owners', 'on', '-mountpoint', mount, '-plist', raw]))
+        try:
+            preferences = mount / 'mobile/Library/Preferences/com.apple.springboard.plist'
+            values = plistlib.loads(preferences.read_bytes()) if preferences.exists() else {}
+            values.update(SBDisableAutoDim=True, SBDontDimOrLockOnAC=True, SBDisableIdleSleep=True)
+            preferences.write_bytes(plistlib.dumps(values, fmt=plistlib.FMT_BINARY))
+            preferences.chmod(0o600)
+            if preferences.stat().st_uid != 501:
+                raise SystemExit(f'{preferences} does not belong to uid 501 (mobile)')
+        finally:
+            subprocess.run(['hdiutil', 'detach', attached['system-entities'][0]['dev-entry']], check=True)
         step(ROOT / 'drivers/DarwinBoot/Test/packed_ramdisk.py', raw, seed)
     finally:
         raw.unlink()
