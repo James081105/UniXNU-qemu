@@ -23,8 +23,8 @@ What QEMU does not cover: the stock bootloader, the board firmware, UFS, touch, 
 | `feeds.toml` | IOStorageFamily, which UniXNU's feeds do not list ([UniXNU#7](https://github.com/UniXNU/UniXNU/issues/7)) |
 | `scripts/make-qemu-adt.py` | Device tree: `make-dt.py` (GICv3, NVRAM proxy, memory window, SHA2-384, platform-only AMFI, root matching, the VirtIO MMIO windows of QEMU's own device tree, `vmm-present`) plus the platform seed and the iPad7,1 identity of the board trees; the UFS test nodes of `make-dt.py` are removed |
 | `scripts/build-darwinboot-efi.py` | DarwinBoot as a standalone driver image |
-| `scripts/run-qemu.py` | Stage the ESP, boot, keep the serial log and take screenshots; `--native-user` boots UniXNU's static test process from mockfs, `--os-root` attaches the OS and SystemOS images |
-| `scripts/qemu-ps.py` | The guest's processes (PID, state, name) of a running `run-qemu.py`, read from the kernel's `allproc` through the QEMU monitor; `--value` reads kernel globals such as the display's counters |
+| `scripts/run-qemu.py` | Stage the ESP, boot, keep the serial log and take screenshots; `--native-user` boots UniXNU's static test process from mockfs, `--os-root` attaches the OS and SystemOS images, `--accel hvf` runs on this Mac's CPU |
+| `scripts/qemu-ps.py` | The guest's processes (PID, state, name) of a running `run-qemu.py`, read from the kernel's `allproc` through the QEMU monitor; `--value` reads kernel globals such as the display's counters, `--log` saves the kernel log |
 | `scripts/qemu_esp.py` | The ESP of a QEMU observation with UniXNU's `gdb-stop.py`: the payload with the kernel step's kernel and extra arguments |
 | `scripts/build-display-abi.py` | The inputs of UniXNU's `audit-mobile-graphics-legacy.py`: this board's kernel as the candidate and the original `IOMobileFramebufferLegacy` observed in QEMU |
 | `scripts/build-native-legacy-display.py`, `package/LegacyDisplayProbe.cpp` | The display archive: UniXNU-sheng's builder and probe reduced to NativeLegacyDisplay, its probe and NativeGOPPresenter, without sheng's touch, HID, key store, CPU frequency, GPU power, log and reset objects |
@@ -54,6 +54,10 @@ python3 out/qemu/tree/scripts/run-qemu.py --display cocoa
 
 `run-qemu.py` writes `out/qemu/run/<time>/` with the serial log, the QEMU command and the screenshots. `--seconds` and `--every` set the run time and the screenshot interval; without `--display cocoa` it runs without a window.
 
+TCG emulates a Cortex-A710 and is slow: the userland below needs about 5 minutes to SpringBoard. `--accel hvf` runs the guest on this Mac's CPU through Hypervisor.framework (tried on an M3 Max: SpringBoard within 100 seconds). The device tree must carry the timer frequency of the accelerator (62.5 MHz under TCG, the host's `hw.tbfrequency` under HVF), so build the payload with `UNIXNU_QEMU_ACCEL=hvf` for it; `run-qemu.py` refuses a payload built for the other one.
+
+The kernel log appears neither on the screen nor on the serial port. `qemu-ps.py --log FILE` saves the kernel's message buffer (the last 128 KiB) of a running VM.
+
 The platform seed in `.cache/platform-seed` is created once per checkout and stays out of Git.
 
 On a new tree the PMGR bridge has no reference kernel yet: the first `build kernel` links a no-op in its place and says so, and the second links the bridge.
@@ -81,17 +85,17 @@ cd out/qemu/tree && python3 scripts/build-os-root.py && cd ../../..
 export XNU_OWNER_DATA_VOLUME_UUID=$(python3 -c "import json; print(json.load(open('../UniXNU-qemu/.cache/firmware/owner-data/seed.json'))['volume_uuid'])")
 ./unixnu defconfig qemu_root_defconfig -D ../UniXNU-qemu
 ./unixnu build kernel -D ../UniXNU-qemu
-./unixnu build payload -D ../UniXNU-qemu --unique-chip-id "$(cat ../UniXNU-qemu/.cache/platform-seed)" \
+UNIXNU_QEMU_ACCEL=hvf ./unixnu build payload -D ../UniXNU-qemu --unique-chip-id "$(cat ../UniXNU-qemu/.cache/platform-seed)" \
   --trust-cache out/qemu/tree/build/original-static-system-trust/original-static-system.bundle \
-  --data-ramdisk ../UniXNU-qemu/.cache/firmware/owner-data/owner-data-32.dbr
+  --data-ramdisk ../UniXNU-qemu/.cache/firmware/owner-data/owner-data-1g.dbr
 
-python3 out/qemu/tree/scripts/run-qemu.py --os-root --display cocoa --seconds 1800
+python3 out/qemu/tree/scripts/run-qemu.py --os-root --accel hvf --display cocoa --seconds 1800
 python3 out/qemu/tree/scripts/qemu-ps.py          # in a second shell, while it runs
 ```
 
-`build-os-root.py` skips each step whose output exists. The first run boots the `qemu_defconfig` kernel in QEMU once (for the storage ABI), signs and checks the 1,483,785 blocks of the OS disk image and the 806,400 blocks of the SystemOS image, and attaches the OS image read-only for the time of the OS policy and the Data seed. The owner private key stays in `out/qemu/tree/build/verified-root-host/keys`; a new key needs new policies, a new kernel and payload. The Data seed and its volume UUID stay in `.cache/firmware/owner-data` of this repository; `qemu_root_defconfig` takes the UUID from the environment because every seed has its own.
+`build-os-root.py` skips each step whose output exists. The first run boots the `qemu_defconfig` kernel in QEMU once (for the storage ABI), signs and checks the 1,483,785 blocks of the OS disk image and the 806,400 blocks of the SystemOS image, and attaches the OS image read-only for the time of the OS policy and the Data seed. The owner private key stays in `out/qemu/tree/build/verified-root-host/keys`; a new key needs new policies, a new kernel and payload. The Data seed and its volume UUID stay in `.cache/firmware/owner-data` of this repository; `qemu_root_defconfig` takes the UUID from the environment because every seed has its own. The seed is grown to 1 GiB: the userland fills 32 MiB within two minutes (backboardd then crashes with ENOSPC), and NativeRamBlock accepts writes to a seed above 2 GiB only through sheng's UFS store. Pages are allocated as they are written; after 2.5 minutes about 260 MiB are.
 
-`--os-root` attaches the OS disk image read-only (without mounting it) and gives QEMU the raw device and the SystemOS image file as two VirtIO block devices. The kernel picks each disk's policy by its size and checks every block it reads, mounts the OS volume by its UUID and accepts it as the root, mounts SystemOS read-only as a union over `/`, mounts the Data ramdisk at `/private/var` and starts the original `/sbin/launchd`. `qemu-ps.py` shows the userland: after 5 minutes about 140 processes (logd, configd, securityd, lockdownd, usermanagerd, backboardd, SpringBoard and the rest of the system daemons). Without the display (an earlier state of `qemu_root_defconfig`) there were about 120 and no SpringBoard, and no panic in a 30-minute run.
+`--os-root` attaches the OS disk image read-only (without mounting it) and gives QEMU the raw device and the SystemOS image file as two VirtIO block devices. The kernel picks each disk's policy by its size and checks every block it reads, mounts the OS volume by its UUID and accepts it as the root, mounts SystemOS read-only as a union over `/`, mounts the Data ramdisk at `/private/var` and starts the original `/sbin/launchd`. `qemu-ps.py` shows the userland: under HVF after 2.5 minutes about 210 processes (logd, configd, securityd, lockdownd, usermanagerd, backboardd, SpringBoard and the rest of the system daemons). Memory is tight: the kernel manages the 4 GiB DarwinBoot window only, and about 17 MiB stay free. Without the display (an earlier state of `qemu_root_defconfig`) there were about 120 and no SpringBoard, and no panic in a 30-minute run.
 
 The display: under `offline-mobile-graphics-load=1` the kernel loads IOMobileGraphicsFamily, and the probe creates NativeLegacyDisplay, a subclass of the original `IOMobileFramebufferLegacy`, on the UEFI frame buffer (ramfb, 800x600) and publishes it under `/arm-io` as the system display. SpringBoard starts and stays up. The screen does not change, though: backboardd opens the frame buffer, calls 15 methods (12 of them return unsupported or an error, as on sheng) and never submits a frame. Upstream observed the same in QEMU: backboardd gets no Metal device (`MTLCreateSystemDefaultDevice` returns nil), so the render server has nothing to draw with. On sheng the Adreno GPU provides Metal. The display's counters:
 
