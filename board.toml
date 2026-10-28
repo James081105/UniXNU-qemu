@@ -133,6 +133,22 @@ kernel_args = [
   "offline-hid-input=1",
   "offline-hid-home=1",
   "sheng-touch-hid=1",
+  # The GPU addon mount, which the kernel gates behind this exact argument:
+  # zzy-native-gpu-addon-mount.patch's native_gpu_addon_prepare() returns before
+  # touching anything unless PE_parse_boot_argn("sheng-gpu-addon") reads 1.
+  # Measured absent until now -- native_gpu_addon_stage stayed 0 and
+  # native_gpu_addon_status stayed -1 (its initial value) across every boot, so
+  # the addon was never attempted and native_gop_ready=0 / frame_count=0 were
+  # the configured consequence rather than a defect in the display probe.
+  # The addon presents /private/var/ngpu/addons over /System/Library/Extensions
+  # (AGXMetalA10, NativeAdrenoMetal), /private/var/ngpu/daemons over
+  # /System/Library/LaunchDaemons (com.apple.backboardd) and the iPadOS 17
+  # wallpaper over its sealed asset.  board.toml's own note above says the render
+  # server ignores every update without that daemon stack, which is the symptom
+  # this is meant to answer.  NOTE: the build does not yet produce
+  # /private/var/ngpu on the Data seed, so this turns a silent skip into a
+  # measured attempt whose failure reason is now visible in the addon counters.
+  "sheng-gpu-addon=1",
 ]
 
 [payload.adt]
