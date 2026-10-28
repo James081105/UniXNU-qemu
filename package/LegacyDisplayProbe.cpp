@@ -12,6 +12,7 @@
 #include <libkern/c++/OSSerialize.h>
 #include <libkern/c++/OSData.h>
 #include <kern/task.h>
+#include <kern/thread.h>
 #include <sys/proc.h>
 #include <pexpert/pexpert.h>
 #include <mach/kmod.h>
@@ -62,6 +63,9 @@ volatile uint32_t native_legacy_guard_slot;
 volatile uint64_t native_legacy_guard_object,native_legacy_guard_caller;
 volatile int native_legacy_surface_status=-1;
 volatile uint32_t native_legacy_surface_found;
+//: How long the off-thread wait is allowed to run, in milliseconds.  Read
+//: back from the guest so a run can say what window it actually used.
+volatile uint32_t native_legacy_surface_wait_ms;
 volatile uint64_t native_legacy_video_base,native_legacy_video_bytes;
 volatile uint64_t native_legacy_gop_map,native_legacy_gop_virtual,native_legacy_gop_physical,native_legacy_gop_bytes;
 volatile uint32_t native_legacy_gop_width,native_legacy_gop_height;
@@ -476,16 +480,43 @@ extern void native_hid_input_probe(void);
 extern void native_virtio_input_probe(void);
 extern void native_shared_window_probe(void);
 extern void native_qemu_metal_publish(void);
+static void native_legacy_display_late_body(void *, wait_result_t);
 void native_legacy_display_late_probe(void) {
     native_keystore_probe();
     native_hid_input_probe();
     native_virtio_input_probe();
     native_shared_window_probe();
     native_qemu_metal_publish();
+    if(!pendingLegacyDisplay)return;
+    /* Everything below waits up to five seconds for the "IOCoreSurfaceRoot"
+     * name, and that name is published by IOSurfaceRoot::start() -- which the
+     * guest log shows happening at t=63.6 s, interleaved with the Data and
+     * SystemOS mounts, both "requested by: init (pid 1)".  init runs only after
+     * bsd_init() returns, so waiting here blocks start_init(), which blocks the
+     * very mounts that publish the service.  Measured: mountroot completes at
+     * t=49.6 s, so no point inside bsd_init() is late enough.
+     *
+     * So the wait runs on its own thread and this function returns at once.
+     * The five probes above stay on the boot thread, where they were measured
+     * to work; none of them is needed to mount the root volume. */
+    thread_t thread=THREAD_NULL;
+    if(kernel_thread_start(native_legacy_display_late_body,NULL,&thread)==KERN_SUCCESS) {
+        thread_deallocate(thread);
+    }
+}
+static void native_legacy_display_late_body(void *__unused arg,wait_result_t __unused wait) {
     IOService *display=pendingLegacyDisplay;if(!display)return;pendingLegacyDisplay=nullptr;
     native_legacy_surface_status=OSKextLoadKextWithIdentifier("com.apple.iokit.IOSurface");
+    /* Five seconds was calibrated for a wait that ran before mountroot.  It now
+     * runs on its own thread, so a longer wait costs nothing but time: the
+     * service the guest log times at t=63.6 s is 14 s after mountroot completes
+     * at t=49.6 s.  The default is 120 s and it is a boot arg so a host can
+     * shorten it without a rebuild. */
+    unsigned surface_wait_ms=120000;
+    PE_parse_boot_argn("offline-legacy-surface-wait-ms",&surface_wait_ms,sizeof(surface_wait_ms));
+    native_legacy_surface_wait_ms=surface_wait_ms;
     OSDictionary *matching=IOService::nameMatching("IOCoreSurfaceRoot");
-    IOService *surface=matching?IOService::waitForMatchingService(matching,5000000000ULL):nullptr;
+    IOService *surface=matching?IOService::waitForMatchingService(matching,(uint64_t)surface_wait_ms*1000000ULL):nullptr;
     native_legacy_surface_found=surface!=nullptr;OSSafeReleaseNULL(surface);OSSafeReleaseNULL(matching);
     PE_Video video={};
     if(!native_legacy_surface_status && native_legacy_surface_found && !PE_current_console(&video)
