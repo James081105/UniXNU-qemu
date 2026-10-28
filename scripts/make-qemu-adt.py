@@ -72,6 +72,7 @@ def main():
     parser.add_argument('--packed-data-ramdisk', action='store_true')
     parser.add_argument('--data-ramdisk', action='store_true')
     parser.add_argument('--trust-cache', action='store_true')
+    parser.add_argument('--gpu-addon', action='store_true')
     args = parser.parse_args()
     if (args.unique_chip_id is None) != (args.chip_id is None):
         parser.error('--unique-chip-id and --chip-id must be supplied together')
@@ -115,6 +116,17 @@ def main():
     if args.packed_data_ramdisk:
         put(chosen, 'ephemeral-storage', struct.pack('<I', 1))
         put(child(chosen, 'memory-map'), 'PackedRAMDisk', bytes(16))
+    # /chosen/memory-map/GpuAddon: the NGPUADD2 blob scripts/make-gpu-addon.py
+    # packs, which the payload carries next to the kernel and the loader places
+    # after the trust caches.  DarwinBoot.c:235 recognises the name and demands
+    # exactly 16 zero bytes, the same placeholder contract as PackedRAMDisk, and
+    # NativeRamBlock.cpp:434 reads the range the loader filled in to materialise
+    # /private/var/ngpu before the addon mounts (sheng-gpu-addon=1).  Without
+    # this entry the loader has nowhere to put it, the kernel creates no
+    # directory, and native_gpu_addon_mount fails its first vnode_lookup with
+    # ENOENT -- measured as native_gpu_addon_stage 1 / status 2.
+    if args.gpu_addon:
+        put(child(chosen, 'memory-map'), 'GpuAddon', bytes(16))
     # /defaults/sleep-disabled: IOPMrootDomain refuses every system sleep (gSleepDisabledFlag, read once boot has
     # completed). ArmCpu cannot quiesce the CPU, and an idle sleep would end in its "unsupported quiesce" panic.
     put(child(tree, 'defaults'), 'sleep-disabled', struct.pack('<I', 1))
