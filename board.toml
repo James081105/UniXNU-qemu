@@ -133,24 +133,42 @@ kernel_args = [
   "offline-hid-input=1",
   "offline-hid-home=1",
   "sheng-touch-hid=1",
-  # The GPU display hand-off, and the ONLY thing that creates the kernel-side
-  # presenter.  native_gop_ready is written at NativeGOPPresenter.cpp:97, inside
-  # NativeGOPPresenter::start(); nothing else in the tree writes it.  And
-  # start() runs only if something constructs the object, which happens at
-  # exactly two sites, both in package/LegacyDisplayProbe.cpp: line 553 under
-  # `phase == 3`, and line 568 under `phase == 4 && sheng-fb-gpu == 1`.
-  # The arguments above are phase=4 with no sheng-fb-gpu, so
-  # native_gop_presenter_create() is never called and start() never runs --
-  # which is why native_gop_ready is 0, and it has nothing to do with the addon.
+  # The GPU display hand-off.  native_gop_ready is written at
+  # NativeGOPPresenter.cpp:97, inside NativeGOPPresenter::start(); nothing else
+  # in the tree writes it.  start() runs only if something constructs the
+  # object, which happens at exactly two sites, both in
+  # package/LegacyDisplayProbe.cpp: line 553 under `phase == 3`, and line 568
+  # under `phase == 4 && sheng-fb-gpu == 1`.
   #
-  # This was measured, not deduced: the guest reports
-  # native_legacy_surface_found=1 and native_legacy_stage=10, and stage 10 is
-  # set inside `if (started && phase == 4)` at line 561 -- the same block whose
-  # next statement reads sheng-fb-gpu.  So the console conditions
-  # NativeGOPPresenter::start() checks (PE_current_console, 32bpp, no rotation,
-  # rowBytes >= width*4) are already satisfied on this guest, because the legacy
-  # probe at line 455 checks the identical set to reach stage 2.  The presenter
-  # is missing for one reason only: nothing asked for it.
+  # CORRECTED 2026-10-29, by measurement rather than by reading.  The revision
+  # of this comment that introduced the argument said the presenter was never
+  # constructed without it, because the delivered arguments are phase=4 with no
+  # sheng-fb-gpu.  Four controlled boots of the SAME delivered material say
+  # otherwise (evidence local-private/tmp/display-counters.py, runs baseline2 /
+  # control0 / control1 / control2):
+  #
+  #   appended argument        native_gop_ready   native_gop_physical
+  #   (none, as delivered)              1             0x1BBEF0000
+  #   sheng-fb-gpu=0                   0             0
+  #   zzz-not-a-real-arg=0              1             0x1BBEF0000
+  #   sheng-fb-gpu=1                   1             0x1BBEF0000
+  #
+  # So the presenter exists in the delivered build already, and only an
+  # EXPLICIT sheng-fb-gpu=0 turns it off.  The source at line 566 reads
+  # `unsigned gpu=0; PE_parse_boot_argn("sheng-fb-gpu",&gpu,sizeof gpu);
+  # if(gpu==1)`, which should make the absent case OFF; the binary makes it ON.
+  # That discrepancy is UNRESOLVED and is recorded as such -- it is not
+  # explained here, because guessing at it would be the third time this session
+  # a plausible reading of this file turned out to be wrong.  What is settled is
+  # the behaviour, which is controlled and reproducible: absent behaves as on.
+  # This argument is kept because it says out loud what the binary already does,
+  # so a future change to that default is a visible diff rather than a silent
+  # one -- but it is NOT what creates the presenter.
+  #
+  # The console conditions NativeGOPPresenter::start() checks (PE_current_console,
+  # 32bpp, no rotation, rowBytes >= width*4) are satisfied on this guest: the
+  # legacy probe at line 455 checks the identical set to reach stage 2, and the
+  # guest reports surface_found=1 / stage=10.
   #
   # The limit, stated because it is the next thing to measure: gpuMode makes the
   # presenter OFFER each finished frame to a privileged client instead of having
