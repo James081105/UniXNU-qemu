@@ -123,6 +123,25 @@ kernel_args = [
   "offline-legacy-register=1",
   "offline-legacy-phase=4",
   "offline-legacy-gop=1",
+  # How long the display probe's own thread waits for IOCoreSurfaceRoot before
+  # giving up.  The default is 120000 and it is the single largest cause of a
+  # boot that reaches the userland and then shows no display at all.
+  #
+  # MEASURED over ten boots of one matched build on the Windows host: four
+  # reached native_legacy_stage=10 and six stopped at stage 8, which is the
+  # give-up path -- native_legacy_surface_status was 0 (the IOSurface kext
+  # loaded) and surface_found was 0, i.e. waitForMatchingService() timed out.
+  # Raising this to 600000 took the same build to stage 10 on both of the next
+  # two boots, with surface_found=1, unit_scale_calls=1, chosen_scale=1 and
+  # native_gop_ready=1.
+  #
+  # The wait is on its own thread (that is what the fork's first commit bought),
+  # so a longer value costs nothing but time on a boot that is going to fail
+  # anyway -- and a boot that loses the display silently is the expensive kind.
+  # 120 s was calibrated for a boot whose mountroot completed at t=49.6 s and
+  # whose surface landed at t=63.6 s; the stalled boots are roughly twice as
+  # slow throughout, which is what puts the surface past the deadline.
+  "offline-legacy-surface-wait-ms=600000",
   "offline-legacy-unit-scale=1",
   "offline-legacy-pm=1",
   "offline-legacy-validate=1",
