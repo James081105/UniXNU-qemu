@@ -194,6 +194,12 @@ struct NmbBuffer {
     uint64_t offset = 0, length = 0, allocation = 0;
     void *guest = nullptr;                     // newBufferWithBytesNoCopy / an IOSurface: the caller's memory; offset is its shadow
     NmbHeap *heap = nullptr;
+    // newBufferWithBytesNoCopy's deallocator, set only by the _releasing form.
+    // It runs once, when this buffer's import is freed -- the last buffer and
+    // every command buffer using it are gone (NativeMetalObjects.h:66-68).  A
+    // refused call never sets it, so a refused buffer never runs it either.
+    void (*release)(void *context, void *pointer, uint64_t length) = nullptr;
+    void *releaseContext = nullptr;
 };
 struct NmbTexture {
     uint64_t handle = 0;
@@ -735,8 +741,19 @@ NmbBuffer *nmb_buffer_new_no_copy(NmbDevice *, void *pointer, uint64_t length, u
     buffer->guest = pointer;
     return buffer;
 }
+NmbBuffer *nmb_buffer_new_no_copy_releasing(NmbDevice *, void *pointer, uint64_t length, uint64_t options,
+                                            void (*release)(void *context, void *pointer, uint64_t length), void *context) {
+    NmbBuffer *buffer = nmb_buffer_new_no_copy(nullptr, pointer, length, options);
+    if (!buffer) return nullptr;               // a refused call never runs the deallocator
+    buffer->release = release;
+    buffer->releaseContext = context;
+    return buffer;
+}
 void nmb_buffer_release(NmbBuffer *buffer) {
     if (!buffer) return;
+    // The deallocator first, while buffer->guest still names the caller's pages:
+    // it is the one thing in this file that hands memory back to its owner.
+    if (buffer->release) buffer->release(buffer->releaseContext, buffer->guest, buffer->length);
     if (buffer->heap) buffer->heap->used -= align(buffer->allocation, QM_HEAP_ALIGNMENT);
     deallocateLater(buffer->offset, buffer->allocation);
     delete buffer;
@@ -805,6 +822,22 @@ static NmbTexture *textureOnBuffer(NmbBuffer *buffer, const struct NmbTextureDes
 NmbTexture *nmb_texture_new_on_buffer(NmbBuffer *buffer, const struct NmbTextureDescriptor *descriptor, uint64_t offset, uint64_t bytes_per_row,
                                       bool iosurface) {
     return textureOnBuffer(buffer, descriptor, offset, bytes_per_row, 0, iosurface);
+}
+NmbTexture *nmb_texture_new_on_surface(NmbBuffer *buffer, const struct NmbTextureDescriptor *descriptor, uint64_t offset, uint64_t bytes_per_row,
+                                       uint32_t pixel_format, uint64_t plane, uint64_t width, uint64_t height, uint64_t chroma_offset,
+                                       uint64_t chroma_bytes_per_row) {
+    // A surface WITH planes.  The wire struct has no field for the plane set
+    // (QMTextureOnBuffer is descriptor, offset, bytesPerRow, bytesPerImage,
+    // surface -- QemuMetalWire.h:105), so what this board can tell the Mac is
+    // "these bytes are a surface, not a plain buffer", and nothing about which
+    // plane or where plane 1 sits.  The parameters are therefore read and
+    // dropped rather than guessed at: a two-plane surface's second plane is not
+    // described to the host, and the Mac's side is what would have to grow a
+    // field for it.  plane 0 of a one-plane surface -- which is every surface
+    // this guest makes today -- is described exactly.
+    (void)pixel_format; (void)plane; (void)width; (void)height;
+    (void)chroma_offset; (void)chroma_bytes_per_row;
+    return textureOnBuffer(buffer, descriptor, offset, bytes_per_row, 0, true);
 }
 NmbTexture *nmb_texture_new_linear(NmbBuffer *buffer, const struct NmbTextureDescriptor *descriptor, uint64_t offset, uint64_t bytes_per_row,
                                    uint64_t bytes_per_image) {
