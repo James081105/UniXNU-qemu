@@ -102,21 +102,33 @@ panic_screen = true
 #   * the OWNER ones -- an original module pair plus this board's own module,
 #     which carries the CDHash of one binary this board builds.
 #
-# The owner entry below is 665af2ff..., the QemuMetal owner trust cache
-# (build-qemu-metal.py guest), whose own module carries
-# QemuMetal.bundle's CDHash a1fce7f8870b9ea068add82ddaa4bfd5b1343aad.
+# The owner entry is ABSENT, deliberately, and the reason is measured rather than
+# assumed.  build-qemu-metal.py guest ran twice on two consecutive device pins
+# whose only difference is this file, and produced two different CDHashes:
 #
-# This digest is EXPECTED TO CHANGE whenever the bundle does.  The own module is
-# a pure function of the CDHash, and the CDHash is a function of the signed code
-# directory, so a bundle that builds differently produces a different cache --
-# and the payload step then refuses it, here, with this list named.  That is the
-# list doing its job: a trust cache nobody expected is exactly what it exists to
-# catch, and re-pinning after a bundle change is a visible step rather than a
-# silent one.  What it must never become is a wildcard.
+#   run 41108366328 (pin 0f1a0834)  CDHash a1fce7f8870b9ea068add82ddaa4bfd5b1343aad
+#                                   owner-trust.bundle 665af2ff7440ec1404522c7e2ddbf45e...
+#   run 41117052708 (pin cc7e8db08) CDHash 68518f18395a53dac252b52b2481902af17faa0c
+#                                   owner-trust.bundle b646229b20c7f08e41ce2fe62c8fc01e...
+#
+# Same sources, same flags, same toolchain.  So the bundle's build is NOT
+# reproducible, and a digest pinned here would be wrong on the next run -- which
+# means the payload step would refuse a trust cache that is correct, and the
+# refusal would name this list.  A pin that is guaranteed to go stale is worse
+# than no pin: it converts "the bundle changed" into "the board is wrong", every
+# single run.
+#
+# The likely cause is ld64's per-link LC_UUID, which lands in the first page and
+# is therefore inside the ad-hoc signature's hashed range.  That is a hypothesis,
+# not a measurement -- nothing in this repository has been shown to vary, and no
+# source-level non-determinism exists (no __DATE__/__TIME__/arc4random/gettimeofday
+# anywhere in package/QemuMetal or drivers/NativeMetal).  build-qemu-metal.py now
+# passes -Wl,-no_uuid to test it.  When the CDHash is stable across two runs, the
+# owner digest gets pinned here again, with the note that it is expected to change
+# whenever the bundle does.
 trust_cache_sha256 = [
   "7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7",
   "8900d6a93d7a59ce1a872a5c081e559f4240a218f97e12d44d22dda46644d68f",
-  "665af2ff7440ec1404522c7e2ddbf45e733d7e7261d452d2ebe9ed341da6351a",
 ]
 # The arguments of UniXNU-pipa. sheng-pmgr=2 publishes the original PMGR nub through the bridge;
 # -apfs_shared_datavolume, as on sheng, lets the user-management stack use the one Data volume of qemu_root_defconfig.

@@ -97,8 +97,28 @@ def bundle():
     BUNDLE.mkdir(parents=True)
     run(['xcrun', 'clang++', *ios, *FLAGS, *includes, '-c', KIT / 'QemuMetalRemote.cpp', '-o', OUT / 'QemuMetalRemote-ios.o'])
     executable = BUNDLE / 'QemuMetal'
+    # -Wl,-no_uuid is a HYPOTHESIS UNDER TEST, not a fix that has been shown to
+    # work.  Measured on two consecutive runs whose only difference is board.toml:
+    # CDHash a1fce7f8870b9ea068add82ddaa4bfd5b1343aad (run 41108366328) versus
+    # 68518f18395a53dac252b52b2481902af17faa0c (run 41117052708), from the same
+    # sources, the same flags and the same toolchain.  So the bundle's build is not
+    # reproducible, and board.toml's trust_cache_sha256 cannot pin a digest that
+    # moves -- a pin guaranteed to go stale converts "the bundle changed" into
+    # "the board is wrong" on every run.
+    #
+    # Nothing in this repository has been shown to vary: there is no __DATE__,
+    # __TIME__, arc4random or gettimeofday in package/QemuMetal or
+    # drivers/NativeMetal, and the include paths are inside one tree at one pinned
+    # commit.  The remaining candidate is ld64's per-link LC_UUID, which lands in
+    # the first page and is therefore inside the ad-hoc signature's hashed range.
+    # -no_uuid omits it; a bundle loaded with dlopen does not need one.
+    #
+    # What this buys either way: two runs with the SAME CDHash prove the build is
+    # reproducible and the digest can be pinned again, and two runs with different
+    # CDHashes refute this hypothesis and name the next candidate.  What it must
+    # not do is silently produce a third answer nobody reads.
     run(['xcrun', 'clang++', *ios, *FLAGS, '-fobjc-arc', *includes, METAL / 'NativeBridgeMetalFrontend.mm', KIT / 'QemuMetalPlugin.mm',
-         KIT / 'QemuMetalLibraries.mm', KIT / 'QemuMetalGaps.mm', OUT / 'QemuMetalRemote-ios.o', '-bundle', '-Wl,-dead_strip', '-lobjc', '-framework', 'Foundation', '-framework', 'Metal',
+         KIT / 'QemuMetalLibraries.mm', KIT / 'QemuMetalGaps.mm', OUT / 'QemuMetalRemote-ios.o', '-bundle', '-Wl,-dead_strip', '-Wl,-no_uuid', '-lobjc', '-framework', 'Foundation', '-framework', 'Metal',
          '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-o', executable])
     run(['strip', '-x', executable])
     (BUNDLE / 'Info.plist').write_bytes(plistlib.dumps(dict(
