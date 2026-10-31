@@ -37,6 +37,14 @@ CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
 CONFIG_XNU_NATIVE_RAM_BLOCK=y
 CONFIG_XNU_OWNER_DATA_MOUNT=y
 CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y
+# The agent channel's guest half.  The driver, the archive builder and the
+# personality patch are all in the pinned tree and all reach the assembled tree;
+# what was missing is this flag and the [kernel] archives entry that builds it.
+# Without both, the flag adds a CFLAG with nothing to compile -- a silent no-op
+# rather than a failure, which is why the board.toml line is the one that
+# matters and this one is the one that keeps the archive from being built for
+# nothing.
+CONFIG_XNU_NATIVE_VIRTIO_CONSOLE=y
 
 CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
 CONFIG_XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE="{tree}/build/native-virtio-block-verified-bundle/libNativeVirtioBlock.a"

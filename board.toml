@@ -34,6 +34,12 @@ archives = [
   "build-arm-driver.py ArmDTPlatform",
   "build-arm-driver.py ArmCpu",
   "build-arm-driver.py NativeAES",
+  # The agent channel's guest half.  Placement is the order the link consumes
+  # them, so it sits with the other build-arm-driver.py entries rather than at
+  # the end of the list.  The builder, the driver source and the personality
+  # patch are all in the pinned tree and all reach the assembled tree; this
+  # entry is the only thing that ever invoked the choice.
+  "build-arm-driver.py NativeVirtioConsole",
   "build-native-aes-bindings.py",
   "build-libpthread-kernel.py",
   "build-mockfs-fixture.py",
