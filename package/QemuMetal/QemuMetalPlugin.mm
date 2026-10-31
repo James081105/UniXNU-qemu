@@ -18,6 +18,7 @@ extern "C" void qemu_metal_set_window(void *base, uint64_t bytes);
 extern "C" void qemu_metal_add_libraries(Class device);
 extern "C" void qemu_metal_answer_gaps(Class cls);
 extern "C" void qemu_metal_complete_frontend(void *device);
+extern "C" void qemu_metal_serve_scanout(void *device, unsigned accelerator);
 extern "C" void qemu_metal_log(const char *format, ...) __attribute__((format(printf, 1, 2)));
 
 @interface _MTLDevice : NSObject
@@ -37,10 +38,12 @@ using EntryFn = kern_return_t (*)(mach_port_t, uint64_t *);
 void missing(const char *cls, const char *selector) {qemu_metal_log("missing selector: %s %s", cls, selector);}
 
 // The service this process opens: the accelerator for the render server, the grant that names this process for any other (the kernel
-// compares the first 16 characters of the name, as proc_selfname gives them), or none.
-mach_port_t service(void *iokit, unsigned accelerator) {
+// compares the first 16 characters of the name, as proc_selfname gives them), or none. *server says which of the two it was, because only
+// the render server's frames are the ones the display driver offers.
+mach_port_t service(void *iokit, unsigned accelerator, bool *server) {
     const char *self = getprogname();
-    if (!strcmp(self, "backboardd")) return accelerator;
+    if (!strcmp(self, "backboardd")) {*server = true; return accelerator;}
+    *server = false;
     // IOKit's objects are Mach ports (io_object_t, io_iterator_t).
     auto matching = (CFMutableDictionaryRef (*)(const char *))dlsym(iokit, "IOServiceMatching");
     auto services = (kern_return_t (*)(mach_port_t, CFDictionaryRef, mach_port_t *))dlsym(iokit, "IOServiceGetMatchingServices");
@@ -73,7 +76,8 @@ id open(unsigned port) {
     auto retain = iokit ? (RetainFn)dlsym(iokit, "IOObjectRetain") : nullptr;
     auto entryID = iokit ? (EntryFn)dlsym(iokit, "IORegistryEntryGetRegistryEntryID") : nullptr;
     if (!serviceOpen || !map || !retain || !entryID) return nil;
-    const mach_port_t target = service(iokit, port);
+    bool server = false;
+    const mach_port_t target = service(iokit, port, &server);
     if (!target) return nil;
     // The discovery releases the accelerator port once this returns; the connection keeps the service.
     retain(port);
@@ -104,6 +108,11 @@ id open(unsigned port) {
     qemu_metal_answer_gaps(object_getClass(device));
     if (Class objects = objc_getClass("NBObject")) qemu_metal_answer_gaps(objects);
     qemu_metal_log("device %s registered for %s", [device name].UTF8String, getprogname());
+    // Only the render server serves the display: the frame the display driver offers is the compositor's surface, which is this process's.
+    // A --metal-clients grant gets a device of its own to render with and leaves the presenter's one frame queue alone, so two clients cannot
+    // race for it. Without this thread the presenter's gpuClient is never set and every offer is refused -- which is exactly the state the
+    // 2026-10-30 run measured (native_gop_gpu_offers=0 with the device open and rendering).
+    if (server) qemu_metal_serve_scanout((__bridge void *)device, port);
     // The frontend's counters and its last refusals, every ten seconds, into the Mac's log.
     pthread_t monitor;
     pthread_create(&monitor, nullptr, [](void *) -> void * {

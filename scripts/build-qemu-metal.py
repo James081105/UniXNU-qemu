@@ -13,6 +13,11 @@
 
 Output stays under build/qemu-metal. The frontend is UniXNU's (drivers/NativeMetal/NativeBridgeMetalFrontend.mm), unchanged; only
 the bridge under it (bridge/NativeMetalObjects.h) is this board's.
+
+`bundle` also links QemuMetalScanout.mm, this board's display hand-off client (sheng-fb-gpu=1): the thread that waits for the display
+driver's frames and has the GPU copy them into the scanout. It is what makes native_gop_gpu_offers move at all -- the presenter refuses
+every offer until a client is inside waitSwap -- and it is the reason a boot could show an open, rendering Metal device and a black screen
+at the same time.
 """
 import hashlib
 import json
@@ -118,7 +123,8 @@ def bundle():
     # CDHashes refute this hypothesis and name the next candidate.  What it must
     # not do is silently produce a third answer nobody reads.
     run(['xcrun', 'clang++', *ios, *FLAGS, '-fobjc-arc', *includes, METAL / 'NativeBridgeMetalFrontend.mm', KIT / 'QemuMetalPlugin.mm',
-         KIT / 'QemuMetalLibraries.mm', KIT / 'QemuMetalGaps.mm', OUT / 'QemuMetalRemote-ios.o', '-bundle', '-Wl,-dead_strip', '-Wl,-no_uuid', '-lobjc', '-framework', 'Foundation', '-framework', 'Metal',
+         KIT / 'QemuMetalScanout.mm', KIT / 'QemuMetalLibraries.mm', KIT / 'QemuMetalGaps.mm', OUT / 'QemuMetalRemote-ios.o', '-bundle',
+         '-Wl,-dead_strip', '-Wl,-no_uuid', '-lobjc', '-framework', 'Foundation', '-framework', 'Metal',
          '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-o', executable])
     run(['strip', '-x', executable])
     (BUNDLE / 'Info.plist').write_bytes(plistlib.dumps(dict(
