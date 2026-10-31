@@ -27,6 +27,10 @@
 #include <unistd.h>
 #include "GpuScanoutClient.h"
 #include "GpuScanoutPresenter.h"
+// Plain C++ with no IOKit in it, so the selector search is compilable and
+// runnable by the host's test suite as well as by this file. See its own header
+// for the bug that is the reason it exists.
+#include "QemuMetalSelector.h"
 
 extern "C" void qemu_metal_log(const char *format, ...) __attribute__((format(printf, 1, 2)));
 
@@ -55,23 +59,33 @@ struct Link {
 
 // {magic, method, payload...} in, the method's own output out. The payload is copied rather than borrowed: the wire records are small and
 // a caller's buffer is not guaranteed to outlive the call's trip through the kernel.
-int tunnel(Link &link, uint32_t method, const void *in, size_t inSize, void *out, size_t outSize) {
+//
+// The selector is a parameter and not a field read, which is the whole of the
+// fix for the bug recorded in QemuMetalSelector.h: the search for an admitted
+// selector cannot consult the one field it is trying to fill in. Reading
+// ``link.selector`` here made the loop ask the same selector 256 times.
+int tunnel(Link &link, uint32_t selector, uint32_t method, const void *in, size_t inSize, void *out, size_t outSize) {
     uint8_t buffer[8 + kPayloadMax] = {};
     if (inSize > kPayloadMax) return -1;
     const uint32_t header[2] = {kTunnelMagic, method};
     memcpy(buffer, header, sizeof header);
     if (inSize) memcpy(buffer + 8, in, inSize);
     size_t produced = outSize;
-    return link.callFn(link.connection, link.selector, buffer, 8 + inSize, out, out ? &produced : nullptr);
+    return link.callFn(link.connection, selector, buffer, 8 + inSize, out, out ? &produced : nullptr);
 }
+
+// The probe's context: the connection to ask, and nothing else. The selector is
+// deliberately absent -- see tunnel's note about why.
+struct Probe {
+    Link *link;
+};
 
 // A probe is a tunnel call whose method is 0xffffffff: the driver answers success for any selector the profile admits and refuses every
 // other one. There is no other way to learn which ones those are -- the profile is not readable from in here -- and assuming a particular
 // selector is admitted is how a hand-off that never gets asked for a frame looks like a working one.
-uint32_t admittedSelector(Link &link) {
-    for (uint32_t selector = 0; selector < 256; ++selector)
-        if (tunnel(link, kProbe, nullptr, 0, nullptr, 0) == 0) return selector;
-    return 0;
+bool probeAdmits(uint32_t selector, void *context) {
+    Probe *probe = static_cast<Probe *>(context);
+    return tunnel(*probe->link, selector, kProbe, nullptr, 0, nullptr, 0) == 0;
 }
 
 // The Transport's context: the connection the three hand-off methods travel through.
@@ -80,7 +94,8 @@ struct Scanout {
 };
 
 int handoffCall(void *context, uint32_t method, const void *in, size_t inSize, void *out, size_t outSize) {
-    return tunnel(static_cast<Scanout *>(context)->link, method, in, inSize, out, outSize);
+    Link &link = static_cast<Scanout *>(context)->link;
+    return tunnel(link, link.selector, method, in, inSize, out, outSize);
 }
 
 int handoffMap(void *context, uint64_t *address, uint64_t *length) {
@@ -111,11 +126,17 @@ void serve(id<MTLDevice> device, mach_port_t accelerator) {
         qemu_metal_log("scanout: the hand-off connection was refused (0x%x)", opened);
         return;
     }
-    link.selector = admittedSelector(link);
-    if (!link.selector) {
+    // The selector the profile admits, found by asking. kNoSelector and
+    // selector 0 are different answers, and the caller must be able to tell
+    // them apart: a profile that admits selector 0 is a working hand-off, and
+    // the broken version of this loop reported it as "nothing is admitted".
+    Probe probe = {&link};
+    const uint32_t selected = qemu_metal_selector::admittedSelector(probeAdmits, &probe);
+    if (selected == qemu_metal_selector::kNoSelector) {
         qemu_metal_log("scanout: the profile admits no external-method selector for this class, so the presenter cannot be asked for a frame");
         return;
     }
+    link.selector = selected;
     qemu_metal_log("scanout: hand-off connection on selector %u", link.selector);
     const gpuscanout::Transport transport = {&context, handoffCall, handoffMap, nullptr};
     gpuscanout::Stats stats = {};
