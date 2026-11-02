@@ -175,6 +175,14 @@ static uint64_t screen_digest(bool *readable) {
     PE_Video video={};
     *readable=false;
     if(!native_gop_ready || !native_gop_virtual)return 0;
+    // The presenter publishes native_gop_physical and native_gop_virtual and THEN
+    // raises native_gop_ready (NativeGOPPresenter.cpp:96-97).  Nothing orders those
+    // writes on the writer's side and this file cannot add a barrier there, so the
+    // read side takes one: see the flag, barrier, then read the data.  The
+    // v_baseAddr cross-check below is the second line of defence -- a stale or
+    // garbage virtual address almost certainly comes with a stale physical one,
+    // and the check fails closed rather than hashing the wrong memory.
+    __asm__ volatile("dmb ish":::"memory");
     if(PE_current_console(&video) || !video.v_baseAddr || !video.v_width || !video.v_height ||
        video.v_depth!=32 || video.v_rotate ||
        video.v_rowBytes<video.v_width*4 || video.v_rowBytes>UINT64_MAX/video.v_height)return 0;
@@ -188,11 +196,13 @@ static uint64_t screen_digest(bool *readable) {
     // Eight bytes at a time where the row allows it: a 3048x2032x32 frame is ~24 MB,
     // and a byte-at-a-time pass over it on the work loop's timer thread is long
     // enough to delay the next input report.  The tail is byte-wise because
-    // v_rowBytes is only guaranteed to be a multiple of 4.
+    // v_rowBytes is only guaranteed to be a multiple of 4.  A direct volatile
+    // 64-bit load rather than memcpy: this translation unit has no reason to pull
+    // in <string.h> for one aligned copy, and ARM64 handles the unaligned tail
+    // case through the byte loop instead.
     uint64_t i=0;
     for(;i+8<=bytes;i+=8) {
-        uint64_t word;
-        memcpy(&word,const_cast<const uint8_t *>(base)+i,sizeof(word));
+        const uint64_t word=*reinterpret_cast<const volatile uint64_t *>(base+i);
         hash^=word;hash*=1099511628211ULL;
     }
     for(;i<bytes;++i) {hash^=base[i];hash*=1099511628211ULL;}
@@ -209,6 +219,18 @@ static unsigned interaction_reports;
 #define INTERACTION_REPORT_LIMIT 4
 // Hand-formatted, not snprintf: this translation unit does not include the header
 // that declares it, and the same constraint is why the kernel patches hand-format.
+// Every copy is bounded by the buffer even though the worst case is 121 of 160
+// bytes, because a future edit to one of the three literals should fail safe
+// rather than silently overrun.
+//
+// THE ORDER IS prefix, before, middle, after, suffix AND NOTHING ELSE.  An earlier
+// revision of this function carried a `parts[]` loop that copied all three literals
+// up front and then copied middle and suffix again after the hex, which produced
+// `{"event":...,"before":"","after":"<hex><middle><hex><suffix>` -- a record that
+// compiles clean and parses as nothing.  That is the exact defect two drafts of the
+// mount emitter had, and the only thing that catches it is reassembling the
+// literals the way the preprocessor will and parsing the result, which
+// local-private/tmp/check-interaction-emitter.py does.
 static void report_interaction(uint64_t before,uint64_t after) {
     if(interaction_reports>=INTERACTION_REPORT_LIMIT)return;
     static char const prefix[]="{\"event\":\"springboard.interaction\",\"before\":\"";
@@ -216,11 +238,12 @@ static void report_interaction(uint64_t before,uint64_t after) {
     static char const suffix[]="\",\"source\":\"XNU.HidInputProbe\"}\n";
     char record[INTERACTION_RECORD_MAX];
     unsigned used=0;
-    for(unsigned k=0;k<sizeof(prefix)-1;++k)record[used++]=prefix[k];
-    for(int shift=60;shift>=0;shift-=4)record[used++]=interaction_hex[(before>>shift)&0xf];
-    for(unsigned k=0;k<sizeof(middle)-1;++k)record[used++]=middle[k];
-    for(int shift=60;shift>=0;shift-=4)record[used++]=interaction_hex[(after>>shift)&0xf];
-    for(unsigned k=0;k<sizeof(suffix)-1;++k)record[used++]=suffix[k];
+    const unsigned limit=sizeof(record)-1;
+    for(unsigned k=0;k<sizeof(prefix)-1 && used<limit;++k)record[used++]=prefix[k];
+    for(int shift=60;shift>=0 && used<limit;shift-=4)record[used++]=interaction_hex[(before>>shift)&0xf];
+    for(unsigned k=0;k<sizeof(middle)-1 && used<limit;++k)record[used++]=middle[k];
+    for(int shift=60;shift>=0 && used<limit;shift-=4)record[used++]=interaction_hex[(after>>shift)&0xf];
+    for(unsigned k=0;k<sizeof(suffix)-1 && used<limit;++k)record[used++]=suffix[k];
     record[used]=0;
     native_console_report(record,used);
     ++interaction_reports;
@@ -229,8 +252,15 @@ static void report_interaction(uint64_t before,uint64_t after) {
 // press or release, 5 the same while held, 6 a touch frame.  0, 1, 2, 3 and 7 are
 // probe lifecycle and liveness, and arming on those would make the record about
 // the driver's own bookkeeping rather than about the guest.
+//
+// THE EARLY RETURN IS A PERFORMANCE BOUND, not a correctness one.  Each arm hashes
+// the whole frame (~24 MB, three million 8-byte reads on TCG), and a held key
+// delivers a report every 100 ms.  Without it, ten reports inside one compare
+// window would be ten hashes; with it there are at most two per second -- one arm
+// and one compare -- which is the same order as the registry walk the checkpoint
+// already does every second.
 static void interaction_arm(void) {
-    if(interaction_reports>=INTERACTION_REPORT_LIMIT)return;
+    if(interaction_armed || interaction_reports>=INTERACTION_REPORT_LIMIT)return;
     bool readable=false;
     interaction_before=screen_digest(&readable);
     interaction_armed=readable;
