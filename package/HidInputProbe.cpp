@@ -27,6 +27,28 @@ volatile uint32_t native_hid_input_command;
 char native_hid_input_registry[2048];
 char native_hid_input_props[1024];
 extern volatile uint32_t native_legacy_transfer_calls;
+// The scanout the GOP presenter mapped and cross-checked against PE_current_console
+// (NativeGOPPresenter.cpp:82-98), exported by it at :14 and :96-97.  Read-only here:
+// this file never writes a pixel, it only measures whether the guest did.
+extern volatile uint32_t native_gop_ready;
+extern volatile uint64_t native_gop_virtual,native_gop_physical;
+// The console publisher, the same strong extern the kernel patches use.
+//
+// PAIRED BY CONFIGURATION, NOT BY LUCK, and that is the whole reason this is safe.
+// The only defconfig that sets CONFIG_XNU_NATIVE_LEGACY_DISPLAY -- whose archive
+// force-loads this object (build-native-legacy-display.py:252-254 puts HidInputProbe.o
+// in libNativeLegacyDisplay.late.a, and build-xnu-4k-baseline.sh:625-627 force-loads it)
+// -- is qemu_root_defconfig, and that same config sets
+// CONFIG_XNU_NATIVE_VIRTIO_CONSOLE, which is what puts libNativeVirtioConsole.a on the
+// kernel link (build-xnu-4k-baseline.sh:672-677).  qemu_defconfig sets NEITHER.  So
+// there is no configuration in which this reference is unresolved.
+//
+// STRONG and never null-checked, for the reason the kernel patches record at length:
+// on build 41330622788 a weak_import reference resolved to null and dropped two
+// records behind a green build, and the `if (symbol)` guard made the absence look
+// deliberate.  A strong reference makes a missing archive fail the link naming the
+// symbol instead.
+extern int native_console_report(const void *, size_t);
 // Optional unattended Home presses for hardware, which has no external harness writing the mailbox:
 // offline-hid-auto-home=<seconds after the second presented frame>, offline-hid-auto-home-count (default 1)
 // and offline-hid-auto-home-interval (default 20 s). Disabled unless the first argument is set.
@@ -106,6 +128,124 @@ static void appendProperty(IORegistryEntry *driver,const char *key,const char *l
     } else if(used<sizeof(native_hid_input_props)-6) {memcpy(native_hid_input_props+used,"none ",5);used+=5;}
     native_hid_input_props[used]=0;
 }
+/* ---------------------------------------------------------------------------
+ * M9: did the input change what is on screen?
+ *
+ * THE PRD VETO IS THE WHOLE REASON THIS EXISTS.  milestones.py:1745-1752::
+ *
+ *     @_predicate("homescreen_screenshot_only")
+ *     def _homescreen_screenshot_only(snapshot):
+ *         return _ok(snapshot, "p.screendump") and not _ok(snapshot, "p.springboard_interaction")
+ *
+ * A homescreen screenshot plus a mouse click is not evidence of an operable
+ * SpringBoard -- it is a screenshot and a click.  The gate refuses to be satisfied
+ * by the pair, so `springboard.interaction` cannot mean "input was delivered".  It
+ * has to mean the input changed what is on screen, and those are different facts.
+ *
+ * BOTH HALVES ARE KERNEL-SIDE, which matters because the guest userspace is Apple's
+ * real code and cannot be modified to emit anything:
+ *
+ *   the screen -- NativeGOPPresenter::start() maps the scanout writable and
+ *     cross-checks the mapping against PE_current_console(): same v_baseAddr,
+ *     v_width, v_height, v_rowBytes, depth 32, no rotate.  It then publishes
+ *     native_gop_ready and native_gop_virtual.  A digest over those bytes is a
+ *     MEASUREMENT of what the user is looking at, not an inference about it.
+ *   the input -- native_hid_input_observed() below is called on every report this
+ *     driver hands to the HID stack, from touchSend() (:188), buttonsAction()
+ *     (:204) and tick() (:244).
+ *
+ * So: digest, deliver, digest again, report only if the two differ.
+ *
+ * WHAT THIS DOES NOT PROVE, SAID PLAINLY.  A digest changing proves the screen
+ * changed after input.  It does not prove the user's intent was honoured -- a clock
+ * redraw would also change it.  The record therefore carries BOTH digests rather
+ * than a boolean, so a reader can see exactly which two states were compared
+ * instead of trusting a claim.  It is bounded to a few records per boot because
+ * the channel's send() waits synchronously (NativeVirtioConsole.cpp:226 sets the
+ * deadline, :250 is the wait) and the gate keeps only the first record for an
+ * event name anyway.
+ * --------------------------------------------------------------------------- */
+
+// A 64-bit FNV-1a digest over the firmware scanout, or false if there is nothing
+// verified to read.  The cross-checks are NativeGOPPresenter::start()'s own, and
+// the one that matters most is the last: native_gop_physical must equal
+// video.v_baseAddr, which is the presenter proving the mapping this file reads
+// through is the mapping it validated.
+static uint64_t screen_digest(bool *readable) {
+    PE_Video video={};
+    *readable=false;
+    if(!native_gop_ready || !native_gop_virtual)return 0;
+    if(PE_current_console(&video) || !video.v_baseAddr || !video.v_width || !video.v_height ||
+       video.v_depth!=32 || video.v_rotate ||
+       video.v_rowBytes<video.v_width*4 || video.v_rowBytes>UINT64_MAX/video.v_height)return 0;
+    if(native_gop_physical!=video.v_baseAddr)return 0;
+    // The presenter writes the frame and issues `dsb oshst` before counting it
+    // (NativeGOPPresenter.cpp:120); read it back under the same ordering.
+    __asm__ volatile("dmb ish":::"memory");
+    const uint64_t bytes=video.v_rowBytes*video.v_height;
+    const volatile uint8_t *base=reinterpret_cast<const volatile uint8_t *>(native_gop_virtual);
+    uint64_t hash=1469598103934665603ULL;
+    // Eight bytes at a time where the row allows it: a 3048x2032x32 frame is ~24 MB,
+    // and a byte-at-a-time pass over it on the work loop's timer thread is long
+    // enough to delay the next input report.  The tail is byte-wise because
+    // v_rowBytes is only guaranteed to be a multiple of 4.
+    uint64_t i=0;
+    for(;i+8<=bytes;i+=8) {
+        uint64_t word;
+        memcpy(&word,const_cast<const uint8_t *>(base)+i,sizeof(word));
+        hash^=word;hash*=1099511628211ULL;
+    }
+    for(;i<bytes;++i) {hash^=base[i];hash*=1099511628211ULL;}
+    *readable=true;
+    return hash;
+}
+static char const interaction_hex[]="0123456789abcdef";
+// The longest record this can build, NUL included: 44 prefix + 16 + 11 + 16 + 32
+// suffix is 119, so 160 can only be under-filled.
+#define INTERACTION_RECORD_MAX 160
+static uint64_t interaction_before;
+static bool interaction_armed;
+static unsigned interaction_reports;
+#define INTERACTION_REPORT_LIMIT 4
+// Hand-formatted, not snprintf: this translation unit does not include the header
+// that declares it, and the same constraint is why the kernel patches hand-format.
+static void report_interaction(uint64_t before,uint64_t after) {
+    if(interaction_reports>=INTERACTION_REPORT_LIMIT)return;
+    static char const prefix[]="{\"event\":\"springboard.interaction\",\"before\":\"";
+    static char const middle[]="\",\"after\":\"";
+    static char const suffix[]="\",\"source\":\"XNU.HidInputProbe\"}\n";
+    char record[INTERACTION_RECORD_MAX];
+    unsigned used=0;
+    for(unsigned k=0;k<sizeof(prefix)-1;++k)record[used++]=prefix[k];
+    for(int shift=60;shift>=0;shift-=4)record[used++]=interaction_hex[(before>>shift)&0xf];
+    for(unsigned k=0;k<sizeof(middle)-1;++k)record[used++]=middle[k];
+    for(int shift=60;shift>=0;shift-=4)record[used++]=interaction_hex[(after>>shift)&0xf];
+    for(unsigned k=0;k<sizeof(suffix)-1;++k)record[used++]=suffix[k];
+    record[used]=0;
+    native_console_report(record,used);
+    ++interaction_reports;
+}
+// ARM.  Events 4, 5 and 6 are the reports this driver actually delivered: 4 is a
+// press or release, 5 the same while held, 6 a touch frame.  0, 1, 2, 3 and 7 are
+// probe lifecycle and liveness, and arming on those would make the record about
+// the driver's own bookkeeping rather than about the guest.
+static void interaction_arm(void) {
+    if(interaction_reports>=INTERACTION_REPORT_LIMIT)return;
+    bool readable=false;
+    interaction_before=screen_digest(&readable);
+    interaction_armed=readable;
+}
+// COMPARE, from the timer's own cadence.  tick() fires this every second (100 ms
+// while a key is held), so the "after" sample is taken up to a second after the
+// input -- long enough for SpringBoard to have drawn, short enough that the guest
+// has not moved on to something unrelated.
+static void interaction_compare(void) {
+    if(!interaction_armed)return;
+    interaction_armed=false;
+    bool readable=false;
+    const uint64_t after=screen_digest(&readable);
+    if(readable && after!=interaction_before)report_interaction(interaction_before,after);
+}
 __attribute__((noinline)) void native_hid_live_checkpoint(IOService *device) {
     size_t used=0;native_hid_input_registry[0]=0;describeInput(device,0,used);
     if(IORegistryEntry *driver=findEventDriver(device,4)) {
@@ -137,9 +277,18 @@ __attribute__((noinline)) void native_hid_live_checkpoint(IOService *device) {
         appendProperty(driver,"PrimaryUsagePage","PP",props);appendProperty(driver,"PrimaryUsage","PU",props);
     }
     __asm__ volatile("" ::: "memory");
+    // The M9 half that turns an input into evidence: digest the screen now and
+    // compare it with the one taken when the report was delivered.  Placed here
+    // rather than in the report path because this runs on the timer's own
+    // cadence, and the guest needs time between the two samples to have drawn.
+    interaction_compare();
 }
 void native_hid_input_observed(unsigned event,int result) {
     if(event<8){native_hid_input_events[event]=native_hid_input_events[event]+1;native_hid_input_results[event]=result;}
+    // A report this driver actually delivered (see interaction_arm for why 4/5/6
+    // and not the others), and it succeeded: result is an IOReturn, where 0 is
+    // success and kIOReturnNotOpen would need the IOKit header to name.
+    if((event==4||event==5||event==6) && result==0)interaction_arm();
 }
 __attribute__((noinline)) void native_hid_checkpoint(void) { __asm__ volatile("" ::: "memory"); }
 void native_hid_input_probe(void) {
