@@ -53,6 +53,24 @@ static bool publishOrMatchWord(IORegistryEntry *entry,const char *key,uint32_t v
     OSData *data=OSData::withBytes(&value,sizeof(value));
     bool result=data && entry->setProperty(key,data);OSSafeReleaseNULL(data);added=result;return result;
 }
+//: The agent channel, declared STRONG, with C linkage, at file scope.
+//: A weak_import reference does not oblige the linker to keep the
+//: definition, and MEASURED on build 41330622788 one resolved to null and
+//: dropped records behind a green build.  A strong reference makes a
+//: missing archive fail the link naming the symbol instead.  Same rule
+//: HidInputProbe.cpp:51 records for its own emitter.
+//:
+//: extern "C" is load-bearing and not decoration: the definition is a C
+//: symbol in the XNU console patch, and this translation unit's functions
+//: all sit OUTSIDE the extern "C" block that ends at line 129, so a bare
+//: `extern int` would mangle the reference into C++ and the kext would
+//: carry an undefined symbol that resolves to nothing at load.  That is
+//: the same failure the weak_import produced -- a green build that emits
+//: nothing -- reached by a different route.  HidInputProbe.cpp gets C
+//: linkage by declaring inside its extern "C" block; this file cannot,
+//: because its emitter is not in one.
+extern "C" int native_console_report(const void *, size_t);
+
 extern "C" {
 volatile uint32_t native_legacy_stage;
 volatile int native_legacy_meta_status=-1;
@@ -119,7 +137,64 @@ bool native_legacy_prepare_scanout(void) {
     if(boot_progress_cancel_scanout)boot_progress_cancel_scanout();
     return false;
 }
-__attribute__((noinline)) void native_legacy_display_checkpoint(void) {__asm__ volatile("" ::: "memory");}
+//: Append one unsigned decimal to a bounded record.  Hand-formatted because
+//: this translation unit includes no header that declares snprintf -- the
+//: same constraint HidInputProbe.cpp records.  Ten digits is the widest a
+//: 32-bit value can be, so text[10] truncates rather than overflows.
+static unsigned native_legacy_put_unsigned(char *record,unsigned used,unsigned size,unsigned value) {
+    char text[10];unsigned digits=0;
+    if(!value)text[digits++]=(char)0x30;
+    while(value&&digits<sizeof(text)){text[digits++]=(char)(0x30+value%10);value/=10;}
+    while(digits&&used<size-1)record[used++]=text[--digits];
+    return used;
+}
+//: Append one bounded literal.  Returns the new length, never past size-1.
+static unsigned native_legacy_put_literal(char *record,unsigned used,unsigned size,const char *text,unsigned length) {
+    for(unsigned i=0;i<length&&used<size-1;++i)record[used++]=text[i];
+    return used;
+}
+//: THE ONE OBSERVABLE POINT IN THIS FILE, and it was missing.
+//:
+//: native_legacy_stage walks 1..8 and 10, native_legacy_surface_status and
+//: native_legacy_surface_found record whether IOSurface loaded and whether
+//: IOCoreSurfaceRoot appeared inside the wait, and native_legacy_dt_attached
+//: records the /arm-io gop-display attach.  Every one of them was written by
+//: a path in native_legacy_display_late_body and read by nothing, so "the
+//: display never came up" and "the display came up and drew nothing" were
+//: the same silence from the host.
+//:
+//: MEASURED, and the reason this exists: two boots, 3538 s and 1500 s, both
+//: froze the framebuffer onto the UniXNU boot menu by t=121 s and never moved
+//: it again, while the guest channel delivered dyld.cache_read at t=914 s and
+//: t=1055 s.  The kernel was running userspace code with a display showing a
+//: boot menu, and no record said which stage the display path had reached.
+//: The boot args carry offline-legacy-surface-wait-ms=600000, so the wait
+//: was still open when the screen stopped -- the path had not been given up
+//: on, it simply never produced a frame.
+//:
+//: Bounded: at most four checkpoints per boot (two in the early init, two in
+//: the late body), so at most four records, each at most one 2000 ms
+//: transport deadline.  Every append is bounded by size-1 regardless.
+__attribute__((noinline)) void native_legacy_display_checkpoint(void) {
+    __asm__ volatile("" ::: "memory");
+    static char const prefix[]="{\"event\":\"diag.legacy_display_status\",\"stage\":";
+    static char const surface[]=",\"surface_status\":";
+    static char const found[]=",\"surface_found\":";
+    static char const dt[]=",\"dt\":";
+    static char const suffix[]=",\"source\":\"XNU.LegacyDisplayProbe\"}\n";
+    char record[192];unsigned used=0;
+    used=native_legacy_put_literal(record,used,sizeof(record),prefix,sizeof(prefix)-1);
+    used=native_legacy_put_unsigned(record,used,sizeof(record),native_legacy_stage);
+    used=native_legacy_put_literal(record,used,sizeof(record),surface,sizeof(surface)-1);
+    used=native_legacy_put_unsigned(record,used,sizeof(record),(unsigned)(native_legacy_surface_status<0?0u:(unsigned)native_legacy_surface_status));
+    used=native_legacy_put_literal(record,used,sizeof(record),found,sizeof(found)-1);
+    used=native_legacy_put_unsigned(record,used,sizeof(record),native_legacy_surface_found);
+    used=native_legacy_put_literal(record,used,sizeof(record),dt,sizeof(dt)-1);
+    used=native_legacy_put_unsigned(record,used,sizeof(record),native_legacy_dt_attached);
+    used=native_legacy_put_literal(record,used,sizeof(record),suffix,sizeof(suffix)-1);
+    record[used]=0;
+    native_console_report(record,used);
+}
 __attribute__((noinline)) void native_legacy_gop_mapping_checkpoint(void) {__asm__ volatile("" ::: "memory");}
 __attribute__((noinline)) void native_legacy_client_checkpoint(void) {__asm__ volatile("" ::: "memory");}
 void native_legacy_pm_observed(unsigned stage,IOReturn status,unsigned long ordinal) {
@@ -505,7 +580,7 @@ void native_legacy_display_late_probe(void) {
     }
 }
 static void native_legacy_display_late_body(void *__unused arg,wait_result_t __unused wait) {
-    IOService *display=pendingLegacyDisplay;if(!display)return;pendingLegacyDisplay=nullptr;
+    IOService *display=pendingLegacyDisplay;if(!display){native_legacy_display_checkpoint();return;}pendingLegacyDisplay=nullptr;
     native_legacy_surface_status=OSKextLoadKextWithIdentifier("com.apple.iokit.IOSurface");
     /* Five seconds was calibrated for a wait that ran before mountroot.  It now
      * runs on its own thread, so a longer wait costs nothing but time: the
