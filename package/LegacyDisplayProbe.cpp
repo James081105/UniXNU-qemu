@@ -522,20 +522,30 @@ enum {kDisplaySlots=358};
 // a file-local symbol is not guaranteed to be in the image's table the way a
 // global is.  extern "C" keeps the name exactly as spelled here.
 //
+// THE INITIALIZERS ARE LOAD-BEARING, and run 41931696815 is why.  In C++ a
+// declaration at namespace scope with no initializer is a DECLARATION, not a
+// definition: clang emits nothing for it and the symbol does not exist in the
+// object at all.  The link then fails with "undefined symbol" naming a symbol
+// the reader can see spelled three lines above, which reads as a linkage puzzle
+// and is a missing definition.  Established locally with ld64.lld, which ships
+// in this project's msys64 tree: of five declaration forms, the only one that
+// fails to link either way is the one with no initializer, and its symbol is
+// absent from llvm-objdump -t entirely.
+//
 // There is deliberately NO per-slot call counter.  The thunks that would have
 // filled one are gone -- see the banner above -- and an array the host can read
 // that is always zero is worse than no array, because it looks like a
 // measurement.  The measurement is the probe's own client table, which records
 // per selector the status the display answered.
-extern "C" uintptr_t native_legacy_slot_original[kDisplaySlots];
+extern "C" uintptr_t native_legacy_slot_original[kDisplaySlots]={};
 //: How many entries the copied vtable holds.  The host checks it is 358, which
 //: is how it knows the copy installed; it is not a count of anything that
 //: happened.
-extern "C" uint32_t native_legacy_slot_armed_count;
+extern "C" uint32_t native_legacy_slot_armed_count=0;
 //: How many refusing stubs were answered instead of entered.  Zero means the
 //: classifier found nothing, which is a finding about the classifier, not about
 //: the display.
-extern "C" uint32_t native_legacy_slot_lifted_count;
+extern "C" uint32_t native_legacy_slot_lifted_count=0;
 static bool native_legacy_slot_trace_armed;
 
 // The answer.  It writes x0 and nothing else, which is precisely the property
