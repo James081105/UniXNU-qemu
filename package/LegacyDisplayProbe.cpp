@@ -476,17 +476,43 @@ extern "C" unsigned native_legacy_clients_dump(char *out,unsigned cap) {
 // OFF unless offline-legacy-slot-trace=1 is on the command line, so a defect here costs one
 // boot rather than the board.
 enum {kDisplaySlots=358};
-// extern "C" and not static: the host reads these by symbol name over QMP, and
-// a file-local symbol is not guaranteed to be in the image's table the way a
-// global is.  extern "C" keeps the name exactly as spelled here.
-extern "C" uint32_t native_legacy_slot_calls[kDisplaySlots];
-extern "C" uintptr_t native_legacy_slot_original[kDisplaySlots];
-extern "C" uint32_t native_legacy_slot_lifted[kDisplaySlots];
-extern "C" uint32_t native_legacy_slot_armed_count;
-extern "C" uint32_t native_legacy_slot_lifted_count;
+// The five the host reads by symbol name over QMP, and they carry THREE
+// attributes that are each load-bearing and none of which is decoration.
+//
+// extern "C" -- a file-local symbol is not guaranteed to be in the image's
+// table the way a global is, and the name must be exactly as spelled here.
+//
+// section("__DATA,unipad_slots") -- NOT __DATA,__common.  Run 41915052472
+// failed its second pass at the kernel LINK, not the compile, with
+// "ld: symbol(s) not found for architecture arm64" naming exactly these
+// symbols and native_legacy_slot_common, every reference from inside the very
+// object that defines them.  The reason is that a symbol named from inline asm
+// is emitted as an UNDEFINED reference no matter what -- the assembler cannot
+// know the reference is intra-unit, so it refuses to resolve it -- and ld will
+// only satisfy such a reference against a real, global definition.  A
+// TENTATIVE definition in __common is not one: commons are merged in a later
+// pass, by which time the undefined reference has already been reported.  An
+// explicit section makes the definition real.  Reproduced locally before the
+// pin moved, with the same target and mode the runner uses.
+//
+// An explicit zero initializer -- because a section-attributed declaration
+// WITHOUT one is treated as a mere declaration and clang emits nothing at all,
+// which is a silent hole rather than a build error.
+//
+// native_legacy_slot_common below is global for the same reason: a `b` from
+// inline asm creates an undefined reference, and a file-local symbol cannot
+// satisfy one.
+extern "C" __attribute__((section("__DATA,unipad_slots"))) uint32_t native_legacy_slot_calls[kDisplaySlots]={};
+extern "C" __attribute__((section("__DATA,unipad_slots"))) uintptr_t native_legacy_slot_original[kDisplaySlots]={};
+extern "C" __attribute__((section("__DATA,unipad_slots"))) uint32_t native_legacy_slot_lifted[kDisplaySlots]={};
+extern "C" __attribute__((section("__DATA,unipad_slots"))) uint32_t native_legacy_slot_armed_count=0;
+extern "C" __attribute__((section("__DATA,unipad_slots"))) uint32_t native_legacy_slot_lifted_count=0;
 static bool native_legacy_slot_trace_armed;
 
-__attribute__((naked,used)) static void native_legacy_slot_common(void) {
+// GLOBAL, and that is not a style choice: the per-slot stubs reach it with a
+// `b` from inline asm, which emits an undefined reference, and a file-local
+// symbol cannot satisfy one.  Run 41915052472's link named this symbol too.
+extern "C" __attribute__((naked,used)) void native_legacy_slot_common(void) {
     // x16 = the slot index, set by the per-slot stub below.
     //
     // GOT-relative, and this is not a stylistic choice: the Apple kext
