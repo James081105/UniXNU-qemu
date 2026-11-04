@@ -222,6 +222,28 @@ kernel_args = [
   "offline-legacy-unit-scale=1",
   "offline-legacy-pm=1",
   "offline-legacy-validate=1",
+  # The display-vtable slot tracer (package/LegacyDisplayProbe.cpp).  OFF by
+  # default and OFF in every build before this one, so a guest booted without
+  # it is byte-identical to one that predates the instrument.
+  #
+  # WHY IT EXISTS.  Addendum AI measured that static BL-reachability cannot say
+  # which of the display's methods a refused selector drives: selector 74's
+  # dispatch function makes 5 direct BL calls and its five callees make 26
+  # indirect BLR between them, so a walk stops after six nodes and reports
+  # "reaches nothing" for a selector whose refusal demonstrably came from slot
+  # 213.  The virtual calls sit one level down, all in leaves.
+  #
+  # So the display's own vtable is copied and every entry replaced with a thunk
+  # that counts the call and branches to the original.  x16/x17 are IP0/IP1 and
+  # x9/x10 are temporaries, so nothing in x0-x7 or the return in x0 is
+  # disturbed -- a thunk is transparent.  It arms from
+  # native_legacy_client_observed(), NOT the display probe, so the display's
+  # own init() and start() are untouched and a thunk defect costs one boot
+  # rather than the board.
+  #
+  # Read back over QMP by symbol name: native_legacy_slot_calls[358],
+  # native_legacy_slot_original[358] and native_legacy_slot_armed_count.
+  "offline-legacy-slot-trace=1",
   "offline-legacy-transfer=1",
   "offline-legacy-cpu-present=1",
   "offline-key-events=1",
