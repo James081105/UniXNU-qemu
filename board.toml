@@ -233,40 +233,49 @@ kernel_args = [
   # "reaches nothing" for a selector whose refusal demonstrably came from slot
   # 213.  The virtual calls sit one level down, all in leaves.
   #
-  # So the display's own vtable is copied and every entry replaced with a thunk
-  # that counts the call and branches to the original.  x16/x17 are IP0/IP1 and
-  # x9/x10 are temporaries, so nothing in x0-x7 or the return in x0 is
-  # disturbed -- a thunk is transparent.  It arms from
-  # native_legacy_client_observed(), NOT the display probe, so the display's
-  # own init() and start() are untouched and a thunk defect costs one boot
-  # rather than the board.
+  # THE DISPLAY'S OWN VTABLE, LIFTED.  Addendum AH lifted ONE refusal of twelve
+  # and nothing moved -- backboardd still made exactly 15 calls, still failed 11
+  # of them, and never called the framebuffer again -- so this lifts ALL of them
+  # at once and asks whether the refusals are the gate collectively.  A positive
+  # narrows the search to a bisect; a negative moves it somewhere else entirely.
   #
-  # Read back over QMP by symbol name: native_legacy_slot_calls[358],
-  # native_legacy_slot_original[358] and native_legacy_slot_armed_count.
-  "offline-legacy-slot-trace=1",
-  # The second half of the same instrument.  Addendum AH lifted ONE refusal of
-  # twelve and nothing moved -- backboardd still made exactly 15 calls and never
-  # called again -- so the next experiment lifts ALL of them at once and asks
-  # whether the refusals are the gate collectively.
-  #
-  # When this is set, the arm pass classifies every slot's own function and
-  # marks the ones that are refusing stubs (MOV w0,#0x2c7, nothing called
-  # before it, a RET after).  A marked slot is answered kIOReturnSuccess by the
-  # thunk and the original is never entered.
+  # When this is set, the arm pass copies the display's vtable and points every
+  # entry whose own function is a refusing stub at native_legacy_slot_success,
+  # which returns kIOReturnSuccess.  The original is never entered.
   #
   # THE SAFETY ARGUMENT, because it is the whole reason this is acceptable: a
   # refusing stub writes NOTHING.  Its body is `MOV w0,#0x2c7` and a RET.  So
-  # replacing it with `MOV w0,#0` changes exactly one register -- the return --
-  # and no out parameter a caller might read.  A caller that dereferenced those
-  # outputs would already be reading uninitialised memory today, and it is not
-  # crashing today.  The lift is not more dangerous than the status quo; it is
-  # the status quo with a different answer.
+  # replacing it with a function that returns 0 changes exactly one register --
+  # the return -- and no out parameter a caller might read.  A caller that
+  # dereferenced those outputs would already be reading uninitialised memory
+  # today, and it is not crashing today.  The lift is not more dangerous than
+  # the status quo; it is the status quo with a different answer.
   #
-  # It rides on the trace: without the thunks there is nowhere to answer from,
-  # so offline-legacy-slot-trace=1 above is required and this is additive.
+  # THERE IS NO ASSEMBLY IN IT, and that is deliberate rather than incidental.
+  # The first three versions of this instrument were naked AArch64 thunks, and
+  # all three failed to build -- twice at the assembler and once at the link,
+  # the last because a symbol named from inline asm is emitted as an undefined
+  # reference that ld64 will not resolve out of an archive, and PRD 8.1's root
+  # chain links this driver from libNativeLegacyDisplay.late.a while the first
+  # pass links the object directly.  Same source, different link shape, one red
+  # and one green.  A plain function cannot have that problem.
   #
-  # Read back over QMP by symbol name: native_legacy_slot_lifted[358] and
-  # native_legacy_slot_lifted_count.
+  # It arms from native_legacy_client_observed(), NOT the display probe, so the
+  # display's own init() and start() are untouched.  The copy is never freed and
+  # the vtable pointer is never restored: the lift has to survive every call for
+  # the rest of the boot, and the whole path is gated on this argument, so a
+  # board booted without it is byte-identical to one that never had the code.
+  #
+  # offline-legacy-lift-slot=N restricts it to one slot, for bisecting once the
+  # collective answer is in.  0, the default, means every refusing slot.
+  #
+  # Read back over QMP by symbol name: native_legacy_slot_original[358],
+  # native_legacy_slot_armed_count and native_legacy_slot_lifted_count.  There
+  # is deliberately no per-slot call counter: the thunks that would have filled
+  # one are gone, and an array the host can read that is always zero is worse
+  # than no array because it looks like a measurement.  The measurement is the
+  # probe's own client table, which records per selector the status the display
+  # answered -- and that is what says whether the lift worked.
   "offline-legacy-lift-refusals=1",
   "offline-legacy-transfer=1",
   "offline-legacy-cpu-present=1",
