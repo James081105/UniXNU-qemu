@@ -489,6 +489,22 @@ static bool native_legacy_slot_trace_armed;
 __attribute__((naked,used)) static void native_legacy_slot_common(void) {
     // x16 = the slot index, set by the per-slot stub below.
     //
+    // GOT-relative, and this is not a stylistic choice: the Apple kext
+    // relocation model REFUSES the ELF form.  `adrp x17, sym; add x17, x17,
+    // :lo12:sym` assembles for Linux and is rejected here with "ADR/ADRP
+    // relocations must be GOT relative" and "unknown AArch64 fixup kind!",
+    // which is what run 41906787039 failed on -- six errors, all of them this
+    // instruction, and the pre-flight that was supposed to catch it was green
+    // because it had been assembled for the wrong target.  `sym@GOTPAGE` /
+    // `sym@GOTPAGEOFF` is what the kext toolchain accepts; it costs one extra
+    // load per array, which on a path that runs a few hundred times a boot is
+    // nothing.
+    //
+    // The label is NUMERIC rather than .L-named for the same class of reason:
+    // the Apple integrated assembler refuses a .L name as the target of a
+    // conditional branch ("conditional branch requires assembler-local
+    // label").  GNU as accepts both, so the numeric form is the portable one.
+    //
     // The lift is three more instructions at the end, and it is why this thunk
     // is not a pure tail call any more.  After counting, it reads this slot's
     // lift flag; if the flag is set the method is answered kIOReturnSuccess
@@ -497,21 +513,21 @@ __attribute__((naked,used)) static void native_legacy_slot_common(void) {
     // is a refusing stub, and a refusing stub writes nothing -- so the lift
     // changes the return value and nothing else.  See the classifier below.
     __asm__ volatile(
-        "adrp x17, native_legacy_slot_original\n\t"
-        "add  x17, x17, :lo12:native_legacy_slot_original\n\t"
+        "adrp x17, native_legacy_slot_original@GOTPAGE\n\t"
+        "ldr  x17, [x17, native_legacy_slot_original@GOTPAGEOFF]\n\t"
         "ldr  x17, [x17, x16, lsl #3]\n\t"          // x17 = the original
-        "adrp x9, native_legacy_slot_calls\n\t"
-        "add  x9, x9, :lo12:native_legacy_slot_calls\n\t"
+        "adrp x9, native_legacy_slot_calls@GOTPAGE\n\t"
+        "ldr  x9, [x9, native_legacy_slot_calls@GOTPAGEOFF]\n\t"
         "ldr  w10, [x9, x16, lsl #2]\n\t"
         "add  w10, w10, #1\n\t"
         "str  w10, [x9, x16, lsl #2]\n\t"
-        "adrp x9, native_legacy_slot_lifted\n\t"
-        "add  x9, x9, :lo12:native_legacy_slot_lifted\n\t"
+        "adrp x9, native_legacy_slot_lifted@GOTPAGE\n\t"
+        "ldr  x9, [x9, native_legacy_slot_lifted@GOTPAGEOFF]\n\t"
         "ldr  w10, [x9, x16, lsl #2]\n\t"
-        "cbz  w10, .Lslot_call_original\n\t"
+        "cbz  w10, 1f\n\t"
         "mov  w0, #0\n\t"                           // kIOReturnSuccess
         "ret\n"
-        ".Lslot_call_original:\n\t"
+        "1:\n\t"
         "br   x17\n\t");
 }
 
