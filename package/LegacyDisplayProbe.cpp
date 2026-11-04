@@ -481,11 +481,21 @@ enum {kDisplaySlots=358};
 // global is.  extern "C" keeps the name exactly as spelled here.
 extern "C" uint32_t native_legacy_slot_calls[kDisplaySlots];
 extern "C" uintptr_t native_legacy_slot_original[kDisplaySlots];
+extern "C" uint32_t native_legacy_slot_lifted[kDisplaySlots];
 extern "C" uint32_t native_legacy_slot_armed_count;
+extern "C" uint32_t native_legacy_slot_lifted_count;
 static bool native_legacy_slot_trace_armed;
 
 __attribute__((naked,used)) static void native_legacy_slot_common(void) {
     // x16 = the slot index, set by the per-slot stub below.
+    //
+    // The lift is three more instructions at the end, and it is why this thunk
+    // is not a pure tail call any more.  After counting, it reads this slot's
+    // lift flag; if the flag is set the method is answered kIOReturnSuccess
+    // here and the original is never entered, otherwise control branches to it
+    // exactly as before.  The flag is only ever set for a slot whose function
+    // is a refusing stub, and a refusing stub writes nothing -- so the lift
+    // changes the return value and nothing else.  See the classifier below.
     __asm__ volatile(
         "adrp x17, native_legacy_slot_original\n\t"
         "add  x17, x17, :lo12:native_legacy_slot_original\n\t"
@@ -495,7 +505,43 @@ __attribute__((naked,used)) static void native_legacy_slot_common(void) {
         "ldr  w10, [x9, x16, lsl #2]\n\t"
         "add  w10, w10, #1\n\t"
         "str  w10, [x9, x16, lsl #2]\n\t"
+        "adrp x9, native_legacy_slot_lifted\n\t"
+        "add  x9, x9, :lo12:native_legacy_slot_lifted\n\t"
+        "ldr  w10, [x9, x16, lsl #2]\n\t"
+        "cbz  w10, .Lslot_call_original\n\t"
+        "mov  w0, #0\n\t"                           // kIOReturnSuccess
+        "ret\n"
+        ".Lslot_call_original:\n\t"
         "br   x17\n\t");
+}
+
+// Addendum AC's classifier, in the kernel, so the lift needs no host in the
+// loop.  A slot refuses only if its function is a STUB: `MOV w0,#0x2c7` with
+// nothing CALLED before it and a RET soon after.  The "nothing called" clause
+// is what separates a stub from a real implementation with a dead tail -- the
+// LEAF() guards at 306, 307 and 337 are `MOV w0,#<slot>; BL
+// native_legacy_backend_guard` with a noreturn panic, and the compiler still
+// emits a dead `MOV w0,#0x2c7` after them.  Matching those would answer a
+// guard's call with success instead of panicking, which is not what an
+// experiment should do.
+//
+// BOUNDED to the first 24 words (96 bytes), which is the same window the host
+// classifier read.  A stub is shorter than that; the bound is recorded because
+// an unbounded read here would run off the end of a page.
+static bool native_legacy_slot_is_refusing_stub(uintptr_t fn) {
+    if(!fn || (fn>>48)!=0xFFFF)return false;
+    const uint32_t *words=reinterpret_cast<const uint32_t *>(fn);
+    for(unsigned j=0;j<24;++j) {
+        uint32_t w=words[j];
+        if((w&0xFFE00000)!=0x52800000) {
+            if((w&0xFC000000)==0x94000000)return false;   // a BL: not a stub
+            continue;
+        }
+        if(((w>>5)&0xFFFF)!=0x2C7 || (w&0x1F)!=0)continue; // MOV w0,#0x2c7
+        for(unsigned m=j;m<j+8 && m<24;++m)if(words[m]==0xD65F03C0)return true;
+        return false;
+    }
+    return false;
 }
 
 // One stub per slot.  The slot number is stringified rather than passed as an
@@ -869,23 +915,29 @@ static uintptr_t native_legacy_slot_thunks_init[kDisplaySlots] = {(uintptr_t)&na
 static void native_legacy_slot_trace_arm(void) {
     if(native_legacy_slot_trace_armed || !native_legacy_object)return;
     unsigned enabled=0;PE_parse_boot_argn("offline-legacy-slot-trace",&enabled,sizeof(enabled));
+    unsigned lift=0;PE_parse_boot_argn("offline-legacy-lift-refusals",&lift,sizeof(lift));
     if(!enabled)return;
     uintptr_t *vtable=*reinterpret_cast<uintptr_t **>(native_legacy_object);
     uintptr_t *copy=static_cast<uintptr_t *>(IOMalloc(kDisplaySlots*sizeof(uintptr_t)));
     if(!copy)return;
     memcpy(copy,vtable,kDisplaySlots*sizeof(uintptr_t));
-    unsigned armed=0;
+    unsigned armed=0,lifted=0;
     for(unsigned i=0;i<kDisplaySlots;++i) {
         // A kernel virtual address has its top 16 bits set.  The test is >> 48,
         // NOT >> 40: for a 48-bit address >> 40 leaves 24 bits and is false for
         // every valid pointer, which is the defect that made an earlier guard in
         // this project reject everything it was meant to check.
         native_legacy_slot_original[i]=copy[i];
-        if(copy[i] && (copy[i]>>48)==0xFFFF){copy[i]=native_legacy_slot_thunks_init[i];++armed;}
+        native_legacy_slot_lifted[i]=0;
+        if(copy[i] && (copy[i]>>48)==0xFFFF){
+            if(lift && native_legacy_slot_is_refusing_stub(copy[i])){native_legacy_slot_lifted[i]=1;++lifted;}
+            copy[i]=native_legacy_slot_thunks_init[i];++armed;
+        }
     }
     *reinterpret_cast<uintptr_t **>(native_legacy_object)=copy;
     native_legacy_slot_trace_armed=true;
     native_legacy_slot_armed_count=armed;
+    native_legacy_slot_lifted_count=lifted;
 }
 
 void native_legacy_client_observed(IOReturn status,IOUserClient *client) {

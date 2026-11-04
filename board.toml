@@ -244,6 +244,30 @@ kernel_args = [
   # Read back over QMP by symbol name: native_legacy_slot_calls[358],
   # native_legacy_slot_original[358] and native_legacy_slot_armed_count.
   "offline-legacy-slot-trace=1",
+  # The second half of the same instrument.  Addendum AH lifted ONE refusal of
+  # twelve and nothing moved -- backboardd still made exactly 15 calls and never
+  # called again -- so the next experiment lifts ALL of them at once and asks
+  # whether the refusals are the gate collectively.
+  #
+  # When this is set, the arm pass classifies every slot's own function and
+  # marks the ones that are refusing stubs (MOV w0,#0x2c7, nothing called
+  # before it, a RET after).  A marked slot is answered kIOReturnSuccess by the
+  # thunk and the original is never entered.
+  #
+  # THE SAFETY ARGUMENT, because it is the whole reason this is acceptable: a
+  # refusing stub writes NOTHING.  Its body is `MOV w0,#0x2c7` and a RET.  So
+  # replacing it with `MOV w0,#0` changes exactly one register -- the return --
+  # and no out parameter a caller might read.  A caller that dereferenced those
+  # outputs would already be reading uninitialised memory today, and it is not
+  # crashing today.  The lift is not more dangerous than the status quo; it is
+  # the status quo with a different answer.
+  #
+  # It rides on the trace: without the thunks there is nowhere to answer from,
+  # so offline-legacy-slot-trace=1 above is required and this is additive.
+  #
+  # Read back over QMP by symbol name: native_legacy_slot_lifted[358] and
+  # native_legacy_slot_lifted_count.
+  "offline-legacy-lift-refusals=1",
   "offline-legacy-transfer=1",
   "offline-legacy-cpu-present=1",
   "offline-key-events=1",
