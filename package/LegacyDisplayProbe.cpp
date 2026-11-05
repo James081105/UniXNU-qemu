@@ -112,6 +112,14 @@ extern void boot_progress_stage(const char *) __attribute__((weak_import));
 volatile uint32_t native_legacy_prepare_calls,native_legacy_prepare_reason,native_legacy_prepare_attempts;
 volatile uint32_t native_legacy_prepare_failures,native_legacy_prepare_retried,native_legacy_prepare_max_attempts;
 volatile uint64_t native_legacy_prepare_wait_us;
+// Task #36: say WHERE the kick path stops.  native_legacy_kick_calls counts
+// kickSwapQueue entries; native_legacy_kick_gate records the last gate taken
+// (0 = the loop ran, 1 = re-entered while kicking).  native_legacy_kick_once_*
+// do the same for kickOnce's two gates, with native_legacy_kick_once_reason
+// naming which sub-condition of gate 1 fired, so "no swap was submitted" can be
+// attributed instead of guessed.
+volatile uint32_t native_legacy_kick_calls,native_legacy_kick_gate,native_legacy_kick_rekick;
+volatile uint32_t native_legacy_kick_once_calls,native_legacy_kick_once_gate,native_legacy_kick_once_reason;
 static uint64_t probeNowUs(void) {uint64_t ns;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);return ns/1000;}
 bool native_legacy_prepare_scanout(void) {
     native_legacy_prepare_calls=native_legacy_prepare_calls+1;native_legacy_prepare_reason=0;native_legacy_prepare_attempts=0;
@@ -322,6 +330,20 @@ __attribute__((noinline)) void native_legacy_transfer_observed(IOReturn status,c
           (unsigned)status,native_legacy_prepare_reason,native_legacy_prepare_attempts);
         boot_progress_stage(message);
     }
+}
+__attribute__((noinline)) void native_legacy_kick_observed(unsigned gate) {
+    native_legacy_kick_calls=native_legacy_kick_calls+1;
+    native_legacy_kick_gate=gate;
+}
+// Task #36.  gate 1 is kickOnce's precondition return, gate 2 its
+// request/validation return, gate 0 means both were passed.  reason names which
+// sub-condition of gate 1 fired: 1 not enabled, 2 already transferred,
+// 3 no logicalPM, 4 no bootMapping, 5 not primary, 6 no pending request,
+// 7 request failed validation.
+__attribute__((noinline)) void native_legacy_kick_once_observed(unsigned gate,unsigned reason) {
+    native_legacy_kick_once_calls=native_legacy_kick_once_calls+1;
+    native_legacy_kick_once_gate=gate;
+    native_legacy_kick_once_reason=reason;
 }
 bool native_legacy_gpu_offer(void *display,IOMemoryDescriptor *memory,uint64_t stride,uint32_t width,uint32_t height) {
     return gpuHandoffPresenter && native_gop_gpu_offer(gpuHandoffPresenter,display,memory,stride,width,height);
