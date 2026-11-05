@@ -402,7 +402,15 @@ struct ClientStat {
     // so the submission is the selector whose arguments carry a layer or a
     // background colour -- and that is only visible if every selector's arguments
     // are recorded, not one selector's.
+    //
+    // Addendum EL: the scalar-only version narrowed the candidates to selectors 29
+    // and 57 -- the two that carry NO scalar input and refuse -- but could not
+    // separate them, because no scalar input is exactly why they are candidates.
+    // A layer and a surface are not scalars, so the structure is where the shape
+    // lives.  Record its size and its first words for the selectors that have one.
     uint64_t sel_args[kSelectors][3];uint8_t sel_args_set[kSelectors];
+    uint32_t sel_struct_size[kSelectors];uint8_t sel_struct_set[kSelectors];
+    uint64_t sel_struct_words[kSelectors][4];
     unsigned regs;struct {uint32_t type;uint64_t port;uint32_t ref,status;} reg[kRegEvents];
     uint64_t sel6_first[3],sel6_last[3];uint32_t sel6_distinct;uint64_t sel6_seen[8][3];uint32_t sel6_calls[8],sel6_fails[8],sel6_status[8];
     uint32_t seq_count;struct {uint32_t a,b,c,status,done,presented;} seq[24];
@@ -446,6 +454,16 @@ static IOReturn wrappedExternal(IOUserClient *client,uint32_t selector,IOExterna
                 stat->sel_args[selector][1]=args->scalarInputCount>1?args->scalarInput[1]:0;
                 stat->sel_args[selector][2]=args->scalarInputCount>2?args->scalarInput[2]:0;
                 stat->sel_args_set[selector]=1;
+            }
+            // Addendum EL: the STRUCTURE, for the selectors whose arguments are
+            // not scalars.  A SwapSetLayer request carries a layer and a surface
+            // in its structure, so this is the only place the swap submission's
+            // shape is visible.
+            if(!stat->sel_struct_set[selector] && args && args->structureInput && args->structureInputSize>=8){
+                stat->sel_struct_size[selector]=(uint32_t)args->structureInputSize;
+                const uint64_t *w=static_cast<const uint64_t *>(args->structureInput);
+                for(unsigned k=0;k<4 && (k+1)*8<=args->structureInputSize;++k)stat->sel_struct_words[selector][k]=w[k];
+                stat->sel_struct_set[selector]=1;
             }
         }
     }
@@ -510,6 +528,18 @@ extern "C" unsigned native_legacy_clients_dump(char *out,unsigned cap) {
                          (unsigned long long)s.sel_args[sel][0],
                          (unsigned long long)s.sel_args[sel][1],
                          (unsigned long long)s.sel_args[sel][2]);
+        }
+        // Addendum EL: the structure of each selector that has one.  A swap is a
+        // SwapSetLayer / SwapSetBackgroundColor request, so the submission is the
+        // selector whose structure carries a layer or a background colour.
+        for(unsigned sel=0;sel<kSelectors && at+90<cap;++sel) {
+            if(!s.selector_calls[sel] || !s.sel_struct_set[sel])continue;
+            at+=snprintf(out+at,cap-at,"  sel%u struct %u bytes: %llx %llx %llx %llx\n",sel,
+                         s.sel_struct_size[sel],
+                         (unsigned long long)s.sel_struct_words[sel][0],
+                         (unsigned long long)s.sel_struct_words[sel][1],
+                         (unsigned long long)s.sel_struct_words[sel][2],
+                         (unsigned long long)s.sel_struct_words[sel][3]);
         }
     }
     return at;
