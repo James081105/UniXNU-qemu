@@ -395,6 +395,14 @@ void native_legacy_client_enter(task_t task,uint32_t type) {
 enum {kSeenClients=8,kSelectors=96,kRegEvents=8,kVtableSlots=256};
 struct ClientStat {
     uintptr_t object;int pid;uint32_t calls,fails;uint32_t selector_calls[kSelectors],selector_fails[kSelectors],selector_status[kSelectors];
+    // Task #41: the first argument set EACH selector was called with.  Selector 6
+    // is the wait, not the swap (NativeLegacyDisplay.cpp:91-93), so the swap
+    // submission cannot be identified from selector 6's arguments.  The swap is a
+    // SwapSetLayer / SwapSetBackgroundColor request (NativeLegacyRequest.h:4-5),
+    // so the submission is the selector whose arguments carry a layer or a
+    // background colour -- and that is only visible if every selector's arguments
+    // are recorded, not one selector's.
+    uint64_t sel_args[kSelectors][3];uint8_t sel_args_set[kSelectors];
     unsigned regs;struct {uint32_t type;uint64_t port;uint32_t ref,status;} reg[kRegEvents];
     uint64_t sel6_first[3],sel6_last[3];uint32_t sel6_distinct;uint64_t sel6_seen[8][3];uint32_t sel6_calls[8],sel6_fails[8],sel6_status[8];
     uint32_t seq_count;struct {uint32_t a,b,c,status,done,presented;} seq[24];
@@ -426,7 +434,20 @@ static IOReturn wrappedExternal(IOUserClient *client,uint32_t selector,IOExterna
             if(at>=0){++stat->sel6_calls[at];if(status)++stat->sel6_fails[at];stat->sel6_status[at]=(uint32_t)status;}
         }
         ++stat->calls;if(status)++stat->fails;
-        if(selector<kSelectors){++stat->selector_calls[selector];if(status)++stat->selector_fails[selector];stat->selector_status[selector]=(uint32_t)status;}
+        if(selector<kSelectors){
+            ++stat->selector_calls[selector];if(status)++stat->selector_fails[selector];stat->selector_status[selector]=(uint32_t)status;
+            // Task #41: the FIRST argument set each selector was called with, so
+            // the swap submission can be recognised by its shape rather than
+            // guessed from its number.  Recorded once per selector; the swap is a
+            // layer or background-colour request, so a selector whose arguments
+            // never look like one is not the submission.
+            if(!stat->sel_args_set[selector] && args && args->scalarInput && args->scalarInputCount>=1){
+                stat->sel_args[selector][0]=args->scalarInput[0];
+                stat->sel_args[selector][1]=args->scalarInputCount>1?args->scalarInput[1]:0;
+                stat->sel_args[selector][2]=args->scalarInputCount>2?args->scalarInput[2]:0;
+                stat->sel_args_set[selector]=1;
+            }
+        }
     }
     return status;
 }
@@ -478,6 +499,18 @@ extern "C" unsigned native_legacy_clients_dump(char *out,unsigned cap) {
             if(++n%6==0)at+=snprintf(out+at,cap-at,"\n  sel");
         }
         if(n)at+=snprintf(out+at,cap-at,"\n");
+        // Task #41: every selector's FIRST argument set, so the swap submission
+        // can be recognised by its shape.  A swap is a SwapSetLayer /
+        // SwapSetBackgroundColor request (NativeLegacyRequest.h:4-5), so the
+        // submission is the selector whose arguments carry a layer or a
+        // background colour.
+        for(unsigned sel=0;sel<kSelectors && at+70<cap;++sel) {
+            if(!s.selector_calls[sel] || !s.sel_args_set[sel])continue;
+            at+=snprintf(out+at,cap-at,"  sel%u args %llx %llx %llx\n",sel,
+                         (unsigned long long)s.sel_args[sel][0],
+                         (unsigned long long)s.sel_args[sel][1],
+                         (unsigned long long)s.sel_args[sel][2]);
+        }
     }
     return at;
 }
