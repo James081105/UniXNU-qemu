@@ -676,7 +676,18 @@ static void native_legacy_slot_trace_arm(void) {
     // every refusing slot, which is the first experiment: addendum AH lifted ONE
     // refusal of twelve and nothing moved, so the question is whether they are
     // the gate together.
+    //
+    // Addendum ET: a RANGE as well, because a single slot forces a linear scan.
+    // Lifting a contiguous range and asking whether a given selector succeeds is
+    // a membership test -- the selector succeeds if and only if its own slot is
+    // inside the range -- and that predicate is monotonic in the right
+    // direction, so binary search applies.  Sixty candidates resolve in six
+    // probes instead of sixty.  Lifting extra slots in the range cannot
+    // un-refuse the selector under test; it can only make more of them succeed.
     unsigned only=0;PE_parse_boot_argn("offline-legacy-lift-slot",&only,sizeof(only));
+    unsigned from=0,to=0;
+    PE_parse_boot_argn("offline-legacy-lift-from",&from,sizeof(from));
+    PE_parse_boot_argn("offline-legacy-lift-to",&to,sizeof(to));
     if(!lift)return;
     uintptr_t *vtable=*reinterpret_cast<uintptr_t **>(native_legacy_object);
     uintptr_t *copy=static_cast<uintptr_t *>(IOMalloc(kDisplaySlots*sizeof(uintptr_t)));
@@ -690,6 +701,11 @@ static void native_legacy_slot_trace_arm(void) {
         // this project reject everything it was meant to check.
         native_legacy_slot_original[i]=copy[i];
         if(only && i!=only)continue;
+        // Addendum ET: the range.  from/to are inclusive bounds; 0 means
+        // unbounded on that side, so an unset pair leaves the behaviour exactly
+        // as it was.
+        if(from && i<from)continue;
+        if(to && i>=to)continue;
         if(copy[i] && (copy[i]>>48)==0xFFFF && native_legacy_slot_is_refusing_stub(copy[i])) {
             copy[i]=(uintptr_t)native_legacy_slot_success;++lifted;
         }
