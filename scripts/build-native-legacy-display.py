@@ -90,6 +90,17 @@ for i in range(168,358):
     elif i==249:header+=' virtual void getDisplayDimensions(uint32_t *,uint32_t *);\n'
     elif i==290:header+=' virtual void kickSwapQueue();\n'
     elif i==296:header+=' virtual bool validateSwap(const OriginalLegacySwapRequest *);\n'
+    # Addendum FB: slot 200 is the swap SUBMISSION.  Selector 17 dispatches to it,
+    # established by a controlled comparison -- lifting [198,200] made selector 17
+    # succeed and lifting [198,199] made it refuse, and the two sets differ only by
+    # slot 200.  Its inherited original is a FOUR-WORD STUB:
+    #   sub sp,sp,#0x10 ; str x0,[sp,#8] ; str x1,[sp] ; mov w0,#0x2c7
+    # which saves x0 and x1 and returns kIOReturnUnsupported.  It is not a real
+    # implementation with an unmet precondition -- it was never implemented.  The
+    # stub saving x1 IS the signature: the method takes one pointer, and it is the
+    # request.  validateSwap at 296 already consumes that same type, so naming this
+    # slot lets the driver finally override the swap path's entry point.
+    elif i==200:header+=' virtual void submitSwap(const OriginalLegacySwapRequest *);\n'
     elif i==295:header+=' virtual void completeCurrentSwap();\n'
     elif i==337:header+=' virtual IOReturn collectCompletionReports(uint32_t,void *,uint32_t *,uint32_t)=0;\n'
     elif i==288:header+=' virtual bool startHardware();\n'
