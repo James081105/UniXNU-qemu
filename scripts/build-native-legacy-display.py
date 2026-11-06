@@ -29,7 +29,7 @@ pure=audit['abstract_slots'];methods=audit['methods']
 # Keep the concrete ABI slots in one list.  The generated declaration and the
 # owned-vtable audit must agree, otherwise a newly named slot can compile in
 # the header and still be rejected during the object audit.
-owned_concrete_slots=(0,1,7,14,84,86,87,141,155,184,188,200,288,290,296)
+owned_concrete_slots=(0,1,7,14,84,86,87,141,155,184,188,288,290,296)
 header='''// SPDX-License-Identifier: BSD-2-Clause-Patent
 // Opaque ABI storage for the exact original class, not source-level access
 // to its private fields. The actual original metadata supplies its full
@@ -94,17 +94,6 @@ for i in range(168,358):
     elif i==249:header+=' virtual void getDisplayDimensions(uint32_t *,uint32_t *);\n'
     elif i==290:header+=' virtual void kickSwapQueue();\n'
     elif i==296:header+=' virtual bool validateSwap(const OriginalLegacySwapRequest *);\n'
-    # Addendum FB: slot 200 is the swap SUBMISSION.  Selector 17 dispatches to it,
-    # established by a controlled comparison -- lifting [198,200] made selector 17
-    # succeed and lifting [198,199] made it refuse, and the two sets differ only by
-    # slot 200.  Its inherited original is a FOUR-WORD STUB:
-    #   sub sp,sp,#0x10 ; str x0,[sp,#8] ; str x1,[sp] ; mov w0,#0x2c7
-    # which saves x0 and x1 and returns kIOReturnUnsupported.  It is not a real
-    # implementation with an unmet precondition -- it was never implemented.  The
-    # stub saving x1 IS the signature: the method takes one pointer, and it is the
-    # request.  validateSwap at 296 already consumes that same type, so naming this
-    # slot lets the driver finally override the swap path's entry point.
-    elif i==200:header+=' virtual void submitSwap(const OriginalLegacySwapRequest *);\n'
     elif i==295:header+=' virtual void completeCurrentSwap();\n'
     elif i==337:header+=' virtual IOReturn collectCompletionReports(uint32_t,void *,uint32_t *,uint32_t)=0;\n'
     elif i==288:header+=' virtual bool startHardware();\n'
@@ -136,6 +125,19 @@ old=candidate.read_bytes();old_image=macho(old)
 names={n:v for v,group in exports(old,old_image).items() for n in group}
 def read(va,n):
     at=backed_offset(old_image['segments'],va,n,len(old));return old[at:at+n]
+# Selector 17 forwards a 3084-byte record directly to provider slot 200 and
+# returns its status. That does not establish a swap-request contract. The
+# actual selector-5 submission accepts 1288 bytes and calls slot 178 instead.
+# Keep slot 200 inherited and opaque; these original-artifact anchors prevent
+# another argument-size inference from silently reclassifying its ABI.
+require(read(0xfffffff005f354c0+17*24,24)==struct.pack('<Q4I',0xfffffff00577a0c8,0,3084,0,0),
+        'Original selector-17 dispatch takes a 3084-byte structure')
+require(read(0xfffffff005f354c0+5*24,24)==struct.pack('<Q4I',0xfffffff005779470,0,1288,0,0),
+        'Original selector-5 submission takes a distinct 1288-byte structure')
+require(read(0xfffffff005778054,36)==bytes.fromhex('e80740f9006d40f9e10340f9080040f9082143f900013fd6fd7b41a9ff830091c0035fd6'),
+        'Original selector-17 helper calls provider slot 200 and returns its status')
+require(read(0xfffffff0057772d4,40)==bytes.fromhex('e20740f9406c40f9e10f40f9080040f908c942f9030080d200013fd6a0c31fb801000014a0c35fb8'),
+        'Original selector-5 submission calls provider slot 178 and consumes its status')
 bindings={'__ZN25IOMobileFramebufferLegacyC2EPK11OSMetaClass':0xfffffff0057865cc,
           '__ZN25IOMobileFramebufferLegacyD2Ev':0xfffffff005786618,
           '__ZN25IOMobileFramebufferLegacy10gMetaClassE':0xfffffff006b35940,
