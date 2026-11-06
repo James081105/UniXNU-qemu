@@ -7,6 +7,7 @@
 #include <IOKit/IOService.h>
 #include <libkern/OSKextLib.h>
 #include <libkern/c++/OSMetaClass.h>
+#include <pexpert/pexpert.h>
 
 extern "C" {
 extern volatile uint32_t native_shared_window_stage;
@@ -19,6 +20,80 @@ unsigned native_qemu_metal_accelerator_instance_size(void);
 IOService *native_qemu_metal_grant_allocate(void);
 bool native_fw_cfg_read(const char *name, char *text, size_t capacity);
 void native_qemu_metal_publish(void);
+}
+
+extern "C" {
+// Default off. Stages: 1 load asked, 2 parent qualified, 3 class registered,
+// 4 service published. These record discovery, never rendered frames.
+volatile uint32_t native_software_discovery_stage;
+volatile int native_software_discovery_status;
+volatile uint32_t native_software_discovery_parent_bytes;
+volatile uint32_t native_software_discovery_child_bytes;
+volatile uint32_t native_software_discovery_inherits;
+volatile uint32_t native_software_discovery_metal_properties;
+volatile uint64_t native_software_discovery_object;
+volatile uint64_t native_software_discovery_registry_id;
+void native_software_discovery_static_init(void) __asm__("__GLOBAL__sub_I_SoftwareDiscovery.cpp");
+IOService *native_software_discovery_allocate(void);
+unsigned native_software_discovery_instance_size(void);
+void native_software_discovery_publish(void);
+}
+
+void native_software_discovery_publish(void)
+{
+    unsigned enabled = 0;
+    PE_parse_boot_argn("unipad-software-discovery", &enabled, sizeof(enabled));
+    if (enabled != 1 || native_software_discovery_stage) return;
+    native_software_discovery_stage = 1;
+    native_software_discovery_status = OSKextLoadKextWithIdentifier("com.apple.iokit.IOGPUFamily");
+    if (native_software_discovery_status) return;
+    const OSSymbol *name = OSSymbol::withCString("IOAcceleratorES");
+    const OSMetaClass *parent = name ? OSMetaClass::getMetaClassWithName(name) : nullptr;
+    OSSafeReleaseNULL(name);
+    native_software_discovery_parent_bytes = parent ? parent->getClassSize() : 0;
+    if (!parent || native_software_discovery_parent_bytes != 136) {
+        native_software_discovery_status = kIOReturnNotFound;
+        return;
+    }
+    native_software_discovery_stage = 2;
+    void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
+    if (!handle) {native_software_discovery_status = kIOReturnNoResources; return;}
+    native_software_discovery_static_init();
+    native_software_discovery_status = OSMetaClass::postModLoad(handle);
+    if (native_software_discovery_status) return;
+    native_software_discovery_child_bytes = native_software_discovery_instance_size();
+    if (native_software_discovery_child_bytes != 136) {
+        native_software_discovery_status = kIOReturnInvalid;
+        return;
+    }
+    native_software_discovery_stage = 3;
+    IOService *service = native_software_discovery_allocate();
+    if (!service || !service->init()) {
+        OSSafeReleaseNULL(service);
+        native_software_discovery_status = kIOReturnNoMemory;
+        return;
+    }
+    native_software_discovery_inherits = service->metaCast("IOAcceleratorES") != nullptr;
+    native_software_discovery_metal_properties =
+        (service->getProperty("MetalPluginName") ? 1U : 0U) |
+        (service->getProperty("MetalPluginClassName") ? 2U : 0U);
+    if (!native_software_discovery_inherits || native_software_discovery_metal_properties) {
+        service->release();
+        native_software_discovery_status = kIOReturnInvalid;
+        return;
+    }
+    service->setName("sgx");
+    service->setProperty("UniPadDiscoveryOnly", true);
+    if (!service->attach(IOService::getPlatform())) {
+        service->release();
+        native_software_discovery_status = kIOReturnNotAttached;
+        return;
+    }
+    service->registerService();
+    native_software_discovery_object = reinterpret_cast<uintptr_t>(service);
+    native_software_discovery_registry_id = service->getRegistryEntryID();
+    native_software_discovery_stage = 4;
+    service->release();
 }
 
 // Stages: 1 IOGPUFamily load asked, 2 its IOAcceleratorES found, 3 own classes registered, 4 published.

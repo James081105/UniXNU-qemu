@@ -820,12 +820,14 @@ extern void native_hid_input_probe(void);
 extern void native_virtio_input_probe(void);
 extern void native_shared_window_probe(void);
 extern void native_qemu_metal_publish(void);
+extern void native_software_discovery_publish(void);
 static void native_legacy_display_late_body(void *, wait_result_t);
 void native_legacy_display_late_probe(void) {
     native_keystore_probe();
     native_hid_input_probe();
     native_virtio_input_probe();
     native_shared_window_probe();
+    native_software_discovery_publish();
     native_qemu_metal_publish();
     if(!pendingLegacyDisplay)return;
     /* Everything below waits up to five seconds for the "IOCoreSurfaceRoot"

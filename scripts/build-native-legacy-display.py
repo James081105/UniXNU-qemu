@@ -231,9 +231,16 @@ accelerator_source=ROOT/'kits/qemu/QemuMetal/QemuMetalAccelerator.cpp'
 accelerator_obj=OUT/'QemuMetalAccelerator.o';accelerator_late=OUT/'QemuMetalAccelerator.late.o'
 run([str(accelerator_source) if str(arg)==str(source) else str(accelerator_obj) if str(arg)==str(OUT/'LegacyDisplayProbe.o') else arg for arg in cmd]
     +['-I',str(ROOT/'drivers/NativeMetal')],cwd=r['directory'])
+discovery_source=ROOT/'kits/qemu/QemuMetal/SoftwareDiscovery.cpp'
+discovery_obj=OUT/'SoftwareDiscovery.o';discovery_late=OUT/'SoftwareDiscovery.late.o'
+run([str(discovery_source) if str(arg)==str(source) else str(discovery_obj) if str(arg)==str(OUT/'LegacyDisplayProbe.o') else arg for arg in cmd]
+    +['-I',str(ROOT/'drivers/NativeMetal')],cwd=r['directory'])
 base_abi=json.loads((ROOT/'scripts/data/ioaccelerator-base-abi.json').read_text())
 require(not base_abi['operational_overrides'] and base_abi['instance_bytes']==136 and base_abi['virtual_entries']==168,
         'The audited original IOAcceleratorES: 136 bytes, 168 entries, no operational overrides')
+for address,fingerprint in base_abi['original_entry_sha256'].items():
+    require(hashlib.sha256(read(int(address,16),32)).hexdigest()==fingerprint,
+            'Exact original accelerator base entry '+address)
 accelerator_bindings={'__ZN15IOAcceleratorESC2EPK11OSMetaClass':int(base_abi['protected_compatible_constructor_aliases'][0],16),
                       '__ZN15IOAcceleratorESD2Ev':int(base_abi['nondeleting_destructor'],16),
                       '__ZN15IOAcceleratorES10gMetaClassE':int(base_abi['metaclass'],16)}
@@ -244,7 +251,34 @@ def undefined_symbols(data):
         if kind==1:names.add(data[strings+ix:data.index(b'\0',strings+ix)].decode())
     return names
 accelerator_imports={name for name in undefined_symbols(accelerator_obj.read_bytes()) if 'IOAcceleratorES' in name}
+discovery_imports={name for name in undefined_symbols(discovery_obj.read_bytes()) if 'IOAcceleratorES' in name}
+require(discovery_imports<=set(accelerator_bindings),'Only the audited original discovery base imports')
+accelerator_imports|=discovery_imports
 require(accelerator_imports<=set(accelerator_bindings),'Only the audited original IOAcceleratorES imports')
+discovery_raw=discovery_obj.read_bytes();discovery_image=macho(discovery_raw)
+table=next(p for c,p,_ in discovery_image['commands'] if c==2)
+at,count,strings,_=struct.unpack_from('<4I',discovery_raw,table+8);discovery_symbols=[]
+for k in range(count):
+    ix,kind,_,_,va=struct.unpack_from('<IBBHQ',discovery_raw,at+k*16)
+    discovery_symbols.append((discovery_raw[strings+ix:discovery_raw.index(b'\0',strings+ix)].decode(),va))
+discovery_name='UniPadSoftwareDiscovery'
+discovery_vtable=next(va for name,va in discovery_symbols if name=='__ZTV'+str(len(discovery_name))+discovery_name)
+discovery_relocations={}
+for segment in discovery_image['segments']:
+    for sec in segment['sections']:
+        if sec['va']<=discovery_vtable<sec['va']+sec['size']:
+            ro,rc=struct.unpack_from('<2I',discovery_raw,sec['command_offset']+56)
+            for k in range(rc):
+                offset,bits=struct.unpack_from('<2I',discovery_raw,ro+k*8)
+                if bits>>27&1 and bits>>28==0 and bits>>25&3==3:
+                    discovery_relocations[sec['va']+offset]=discovery_symbols[bits&0xffffff][0]
+discovery_entries=[discovery_relocations.get(discovery_vtable+16+i*8) for i in range(168)]
+require(all(discovery_entries) and discovery_vtable+16+168*8 not in discovery_relocations,
+        'Exact 168-entry discovery vtable extent')
+original_service=struct.unpack('<168Q',read(names['__ZTV9IOService']+16,168*8))
+for i,name in enumerate(discovery_entries):
+    require((discovery_name in name) if i in (0,1,7) else names.get(name)==original_service[i],
+            'Discovery metadata only; original service operational slot '+str(i))
 accelerator_asm=OUT/'accelerator-bindings.S'
 accelerator_asm.write_text(''.join(f'.globl {n}\n.set {n}, {a:#x}\n' for n,a in sorted(accelerator_bindings.items()) if n in accelerator_imports))
 run(['xcrun','clang','-target','arm64-apple-ios17.0','-isysroot',sdk,'-c',accelerator_asm,'-o',OUT/'accelerator-bindings.o'])
@@ -252,6 +286,10 @@ run([llvm/'llvm-objcopy','--remove-section=__DATA,__mod_init_func','--globalize-
      accelerator_obj,accelerator_late])
 require(code(accelerator_obj.read_bytes(),macho(accelerator_obj.read_bytes()))==code(accelerator_late.read_bytes(),macho(accelerator_late.read_bytes())),
         'Owned accelerator instructions unchanged by late init staging')
+run([llvm/'llvm-objcopy','--remove-section=__DATA,__mod_init_func','--globalize-symbol=__GLOBAL__sub_I_SoftwareDiscovery.cpp',
+     discovery_obj,discovery_late])
+require(code(discovery_obj.read_bytes(),macho(discovery_obj.read_bytes()))==code(discovery_late.read_bytes(),macho(discovery_late.read_bytes())),
+        'Owned discovery instructions unchanged by late init staging')
 # The display backend, its probe, the key store and the HID input: sheng's boot process, log, reset, touch panel, CPU
 # frequency and GPU power objects stay out (they drive sheng hardware or need its kit and NativeAdreno).
 archive=OUT/'libNativeLegacyDisplay.late.a';archive.unlink(missing_ok=True)
@@ -270,11 +308,11 @@ run([llvm/'llvm-objcopy','--remove-section=__DATA,__mod_init_func',
 require(code((keyevents/'NativeKeyStoreEvents.o').read_bytes(),macho((keyevents/'NativeKeyStoreEvents.o').read_bytes()))==
         code(keyevents_late.read_bytes(),macho(keyevents_late.read_bytes())),'Owned event-service instructions unchanged by late init staging')
 run(['xcrun','ar','rcs',archive,late,OUT/'original-bindings.o',OUT/'LegacyDisplayProbe.o',keystore_obj,keyevents_late,
-     hid_obj,touch_obj,virtio_input_obj,shared_window_obj,metal_publish_obj,accelerator_late,OUT/'accelerator-bindings.o',
+     hid_obj,touch_obj,virtio_input_obj,shared_window_obj,metal_publish_obj,accelerator_late,discovery_late,OUT/'accelerator-bindings.o',
      hid_dir/'NativeHidInput.late.o',hid_dir/'hid-original-bindings.o'])
 sources=[ROOT/'drivers/NativeMobileDisplay/NativeLegacyDisplay.cpp',ROOT/'drivers/NativeMobileDisplay/NativeLegacyRequest.h',source,
          keystore_source,ROOT/'drivers/NativeKeyStoreEvents/NativeKeyStoreEvents.cpp',hid_source,touch_source,virtio_input_source,
-         shared_window_source,metal_publish_source,accelerator_source,ROOT/'drivers/NativeMetal/OriginalAcceleratorABI.h',
+         shared_window_source,metal_publish_source,accelerator_source,discovery_source,ROOT/'drivers/NativeMetal/OriginalAcceleratorABI.h',
          ROOT/'drivers/NativeHidInput/NativeHidInput.cpp',ROOT/'scripts/build-native-hid-input.py']
 print(run(['python3',ROOT/'scripts/build-arm-driver.py','NativeGOPPresenter'],text=True),end='')
 gop=ROOT/'build/native-gop-presenter';gop_late=gop/'NativeGOPPresenter.late.o'
