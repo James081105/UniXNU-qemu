@@ -26,6 +26,10 @@ def sha(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 print(run(['python3',ROOT/'scripts/audit-mobile-graphics-legacy.py'],text=True),end='')
 audit=json.loads((ROOT/'build/display-analysis/mobile-graphics-legacy-abi.json').read_text())
 pure=audit['abstract_slots'];methods=audit['methods']
+# Keep the concrete ABI slots in one list.  The generated declaration and the
+# owned-vtable audit must agree, otherwise a newly named slot can compile in
+# the header and still be rejected during the object audit.
+owned_concrete_slots=(0,1,7,14,84,86,87,141,155,184,188,200,288,290,296)
 header='''// SPDX-License-Identifier: BSD-2-Clause-Patent
 // Opaque ABI storage for the exact original class, not source-level access
 // to its private fields. The actual original metadata supplies its full
@@ -140,12 +144,12 @@ owned=[];native=[]
 for i,name in enumerate(compiled):
     expected=int(methods[i]['address'],16)
     if name.startswith(('__ZN19NativeLegacyDisplay','__ZNK19NativeLegacyDisplay')):
-        owned.append(i);require(i in (0,1,7,14,84,86,87,141,155,184,188,288,290,296) or i in pure,'Only qualified own methods and guarded leaves override')
+        owned.append(i);require(i in owned_concrete_slots or i in pure,'Only qualified own methods and guarded leaves override')
     elif '25IOMobileFramebufferLegacy' in name:
         require(i not in pure,'No unresolved original abstract backend target');bindings[name]=expected
     else:
         require(i<168 and names.get(name)==expected,'Actual inherited native base symbol '+str(i));native.append(i)
-require(owned==sorted([0,1,7,14,84,86,87,141,155,184,188,288,290,296]+pure),'Exact owned method set')
+require(owned==sorted(list(owned_concrete_slots)+pure),'Exact owned method set')
 undefined={n for n,_,k in symbols if k==1 and 'IOMobileFramebufferLegacy' in n}
 require(undefined==set(bindings),'All and only actual original-class imports qualified')
 # Exact original IOSurface getters, independently observed through the real
